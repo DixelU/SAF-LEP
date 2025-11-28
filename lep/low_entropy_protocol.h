@@ -87,7 +87,7 @@ constexpr uint8_t embedded_test(uint8_t length)
 	return 1 << length;
 }
 
-inline constexpr auto __check = embedded_test(1);
+inline constexpr auto __check = embedded_test(4);
 
 struct lep_v0_encoder_state
 {
