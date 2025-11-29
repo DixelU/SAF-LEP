@@ -95,7 +95,7 @@ struct lep_v0_encoder_state
 	std::uint16_t index = 0;
 	std::uint32_t g_seed = 0;
 
-	int fastrand()
+	constexpr int fastrand()
 	{
 		g_seed = 21401 * g_seed + 25311;
 		return (g_seed >> 8) & 0xFF;
