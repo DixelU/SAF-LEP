@@ -108,7 +108,7 @@ constexpr std::vector<uint8_t> put_lep_v0(lep_v0_encoder_state &state, const uin
 	if (size > (1 << (24 - 2)))
 		return {};
 
-	const uint8_t ground_state = 'T' - state.fastrand() & 0x7;
+	const uint8_t ground_state = 'T' - (state.fastrand() & 0x7);
 	std::vector<uint8_t> encoded_data(header_size, 0);
 	encoded_data.reserve(size * 3);
 
@@ -148,13 +148,14 @@ constexpr std::vector<uint8_t> put_lep_v0(lep_v0_encoder_state &state, const uin
 		const uint8_t take_bits_count = (random_value & 0x3) + 1;
 		const uint8_t possible_bits_count = std::min(take_bits_count, bits_left);
 
-		encoded_data.push_back(encode_lep(byte, take_bits_count, ground_state));
+		encoded_data.push_back(encode_lep(byte, possible_bits_count, ground_state));
 
 		random_value >>= 2;
 		if (!random_value)
 			random_value = state.fastrand();
 
 		bits_left -= possible_bits_count;
+		byte >>= possible_bits_count;
 	}
 
 	encoded_data[5] = (encoded_data.size() >> 16)	& 0xFF;
