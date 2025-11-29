@@ -6,6 +6,7 @@
 #include <vector>
 #include <span>
 #include <cstdint>
+#include <stdexcept>
 
 namespace dixelu
 {
@@ -87,7 +88,7 @@ constexpr uint8_t embedded_test(uint8_t length)
 	return 1 << length;
 }
 
-inline constexpr auto __check = embedded_test(4);
+inline constexpr auto __check_lep_integrity = embedded_test(4);
 
 struct lep_v0_encoder_state
 {
@@ -101,14 +102,14 @@ struct lep_v0_encoder_state
 	}
 };
 
-std::vector<uint8_t> put_lep_v0(lep_v0_encoder_state &state, const uint8_t *data, std::size_t size)
+constexpr std::vector<uint8_t> put_lep_v0(lep_v0_encoder_state &state, const uint8_t *data, std::size_t size)
 {
-	constexpr int header = 8;
+	constexpr int header_size = 8;
 	if (size > (1 << (24 - 2)))
 		return {};
 
 	const uint8_t ground_state = 'T' - state.fastrand() & 0x7;
-	std::vector<uint8_t> encoded_data(header, 0);
+	std::vector<uint8_t> encoded_data(header_size, 0);
 	encoded_data.reserve(size * 3);
 
 	encoded_data[0] = 0b00110000;
@@ -162,6 +163,66 @@ std::vector<uint8_t> put_lep_v0(lep_v0_encoder_state &state, const uint8_t *data
 
 	return encoded_data;
 }
+
+struct lep_decoded_packet
+{
+	std::vector<uint8_t> data;
+	uint16_t index = 0;
+};
+
+constexpr lep_decoded_packet get_lep_v0(const uint8_t *data, std::size_t size)
+{
+	constexpr int header_size = 8;
+	if (size <= header_size)
+		return {};
+
+	uint8_t first_header_byte = data[0];
+	if (first_header_byte != 0b00110000)
+		return {};
+
+	lep_decoded_packet decoded_packet;
+	uint8_t second_header_byte = data[1];
+
+	decoded_packet.index = (data[2] << 8) | data[3];
+	uint8_t ground_state = second_header_byte ^ data[4];
+	uint8_t bit_index = 0;
+	uint8_t buffered_byte = 0;
+
+	std::span payload(data + header_size, size - header_size);
+	for (const uint8_t byte : payload)
+	{
+		const auto decoded_value = decode_lep(byte, ground_state);
+		buffered_byte = (buffered_byte << decoded_value.len) | decoded_value.data;
+		bit_index += decoded_value.len;
+
+		if (bit_index == 8)
+		{
+			bit_index = 0;
+			buffered_byte = 0;
+			decoded_packet.data.push_back(buffered_byte);
+		}
+		else if (bit_index > 8)
+			throw std::runtime_error("LEP decoder: bit index overflow");
+	}
+
+	return decoded_packet;
+}
+
+constexpr bool compiletime_encoder_test()
+{
+	lep_v0_encoder_state __state{ 0, 0xAF65423 };
+	std::vector<uint8_t> values;
+
+	for (int i = 0; i < 27; i++)
+		values.push_back(__state.fastrand());
+
+	auto encoded_values = put_lep_v0(__state, values.data(), values.size());
+	auto decoded_values = get_lep_v0(encoded_values.data(), encoded_values.size());
+
+	return decoded_values.data == values;
+}
+
+constexpr bool __lep_v0_encoder_test = compiletime_encoder_test();
 
 } // namespace v0
 

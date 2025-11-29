@@ -8,7 +8,6 @@ Sacrificing the bandwidth for stability :D
 # Protocol
 
 Low entropy data is embedded into the lower bits of each byte of the data packet.
-As of v0 it only does so with the 
 
 
 
