@@ -210,7 +210,7 @@ constexpr lep_decoded_packet get_lep_v0(const uint8_t *data, std::size_t size)
 	return decoded_packet;
 }
 
-bool compiletime_encoder_test()
+constexpr bool compiletime_encoder_test()
 {
 	lep_v0_encoder_state __state{ 0, 0xAF65423 };
 	std::vector<uint8_t> values;
@@ -221,9 +221,6 @@ bool compiletime_encoder_test()
 	const auto encoded_values = put_lep_v0(__state, values.data(), values.size());
 	const auto decoded_values = get_lep_v0(encoded_values.data(), encoded_values.size());
 
-	for (int idx = 0; idx < decoded_values.data.size(); idx++)
-		std::print("{:02X} -> {:02X}\n", decoded_values.data[idx], values[idx]);
-
 	return decoded_values.data == values;
 }
 
@@ -233,15 +230,41 @@ bool compiletime_encoder_test()
 
 } // namespace details
 
-struct voip_v0;
-struct htm_v0;
+struct raw_lep_v0;
+
+struct packet
+{
+	std::vector<std::uint8_t> data;
+	uint16_t index = 0;
+};
 
 template<typename tag>
 struct low_entropy_protocol
 {
-	static constexpr std::vector<std::uint8_t> encode(const std::uint8_t *data, std::size_t size);
-	static constexpr std::vector<std::uint8_t> decode(const std::uint8_t *data, std::size_t size);
+	static constexpr std::vector<std::uint8_t>
+		encode(const std::uint8_t *data, std::size_t size, uint16_t index = 0);
+
+	static constexpr packet
+		decode(const std::uint8_t *data, std::size_t size);
 };
+
+template <>
+constexpr std::vector<std::uint8_t> low_entropy_protocol<raw_lep_v0>::encode(
+	const std::uint8_t* data, std::size_t size, uint16_t index)
+{
+	details::v0::lep_v0_encoder_state encoder;
+	encoder.index = index;
+
+	return details::v0::put_lep_v0(encoder, data, size);
+}
+
+template <>
+constexpr packet low_entropy_protocol<raw_lep_v0>::decode(const std::uint8_t* data, std::size_t size)
+{
+	auto packet_data = details::v0::get_lep_v0(data, size);
+
+	return packet{ .data = packet_data.data, .index = packet_data.index };
+}
 
 } // namespace lep
 } // namespace dixelu
