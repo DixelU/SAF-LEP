@@ -89,7 +89,7 @@ constexpr uint8_t embedded_test(uint8_t length)
 	return 1 << length;
 }
 
-inline constexpr auto __check_lep_integrity = embedded_test(5);
+// inline constexpr auto __check_lep_integrity = embedded_test(5);
 
 struct lep_v0_encoder_state
 {
