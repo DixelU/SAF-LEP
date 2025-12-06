@@ -106,7 +106,17 @@ bool TunAdapter::configure(const std::string& ip_address, const std::string& net
 bool TunAdapter::set_status(bool connected)
 {
 	std::string cmd = "ip link set " + dev_name_ + (connected ? " up" : " down");
-	return system(cmd.c_str()) == 0;
+	if (system(cmd.c_str()) != 0) return false;
+
+	if (connected)
+	{
+		// Set MTU to 1400 to avoid fragmentation issues with UDP encapsulation
+		std::string mtu_cmd = "ip link set dev " + dev_name_ + " mtu 1400";
+		std::cout << "Configuring MTU: " << mtu_cmd << std::endl;
+		system(mtu_cmd.c_str());
+	}
+
+	return true;
 }
 
 std::vector<uint8_t> TunAdapter::read()
