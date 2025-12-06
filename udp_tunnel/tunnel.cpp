@@ -455,27 +455,32 @@ void vpn_interface::read_from_tap()
 #endif
 		if (!packet.empty())
 		{
-			std::cout << "[VPN] Read " << packet.size() << " bytes from TUN";
-			if (packet.size() >= 20)
+			uint8_t version = packet[0] >> 4;
+			if (version == 4)
 			{
-				// Simple hex dump of IP header
-				std::cout << " IP: ";
-				for (int i = 0; i < 20; ++i)
+				std::cout << "[VPN] Read " << packet.size() << " bytes from TUN";
+				if (packet.size() >= 20)
 				{
-					std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)packet[i] << " ";
+					// Extract src/dst for IPv4
+					char src[16], dst[16];
+					sprintf(src, "%d.%d.%d.%d", packet[12], packet[13], packet[14], packet[15]);
+					sprintf(dst, "%d.%d.%d.%d", packet[16], packet[17], packet[18], packet[19]);
+					std::cout << " (IPv4: " << src << " -> " << dst << ")";
 				}
-				std::cout << std::dec;
+				std::cout << std::endl;
 				
-				// Extract src/dst
-				char src[16], dst[16];
-				sprintf(src, "%d.%d.%d.%d", packet[12], packet[13], packet[14], packet[15]);
-				sprintf(dst, "%d.%d.%d.%d", packet[16], packet[17], packet[18], packet[19]);
-				std::cout << " (" << src << " -> " << dst << ")";
+				// Broadcast to all peers
+				tunnel_->broadcast(packet);
 			}
-			std::cout << std::endl;
-
-			// Broadcast to all peers (simple hub mode)
-			tunnel_->broadcast(packet);
+			else if (version == 6)
+			{
+				// Ignore IPv6 for now to reduce log noise
+				// std::cout << "[VPN] Ignored IPv6 packet (" << packet.size() << " bytes)" << std::endl;
+			}
+			else
+			{
+				std::cout << "[VPN] Read unknown packet type " << (int)version << " (" << packet.size() << " bytes)" << std::endl;
+			}
 		}
 	}
 }
