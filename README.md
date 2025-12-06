@@ -46,6 +46,7 @@ The server must allow IP forwarding and NAT for the VPN to provide internet acce
 ## Running the Client side
   - **Important**: To avoid a routing loop, add a specific route to the server's public IP via your local gateway before starting the VPN.
 
+### Linux
 - Replace <GATEWAY_IP> with your local router IP (e.g., 192.168.1.1)
   ```bash
   sudo ip route add <SERVER_PUBLIC_IP> via <GATEWAY_IP>
@@ -59,3 +60,19 @@ The server must allow IP forwarding and NAT for the VPN to provide internet acce
 - Verification
   Ping: ping 10.0.0.1 (from client)
   Internet: curl google.com or traceroute google.com (should show hops through the VPN)
+
+### Windows
+- Replace <GATEWAY_IP> with your local router IP (e.g., 192.168.1.1)
+  ```bash
+  route add <SERVER_PUBLIC_IP> mask 255.255.255.255 <YOUR_REAL_GATEWAY_IP> metric 1
+  ```
+
+- Then start the client, pointing to the server's public IP and setting the gateway to the VPN server's virtual IP:
+  ```bash
+  ./build_windows/SAF-LEP.exe -c <SERVER_PUBLIC_IP>:14578 --ip 10.0.0.2 --gw 10.0.0.1
+  ```
+
+- Verification
+  Ping: ping 10.0.0.1 (from client)
+  Internet: curl google.com or traceroute google.com (should show hops through the VPN)
+

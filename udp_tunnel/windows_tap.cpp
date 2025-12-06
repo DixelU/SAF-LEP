@@ -259,6 +259,21 @@ bool TapAdapter::is_valid() const
 	return handle_ != INVALID_HANDLE_VALUE;
 }
 
+std::vector<uint8_t> TapAdapter::get_mac() const
+{
+	if (handle_ == INVALID_HANDLE_VALUE)
+		return {};
+
+	std::vector<uint8_t> mac(6);
+	DWORD len;
+	if (DeviceIoControl(handle_, TAP_WIN_IOCTL_GET_MAC, &mac[0], 6, &mac[0], 6, &len, NULL))
+	{
+		return mac;
+	}
+
+	return {};
+}
+
 } // namespace udp
 } // namespace dixelu
 

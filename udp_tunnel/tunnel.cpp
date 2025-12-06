@@ -38,8 +38,6 @@ p2p_tunnel::p2p_tunnel(uint16_t local_port)
 	local_endpoint_ = socket_.local_endpoint();
 }
 
-// ... (destructor and start/stop methods unchanged) ...
-
 p2p_tunnel::~p2p_tunnel()
 {
 	stop();
@@ -145,16 +143,10 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 			// Parse header: [PacketID(2)][FragIndex(1)][TotalFrags(1)]
 			if (decoded.data.size() < 4)
 			{
-				// std::cerr << "Received packet too small for fragment header" << std::endl;
 				// Treat as legacy/handshake if size 1 and 0x00?
-				// For now, just pass through if it looks like handshake
 				if (decoded.data.size() == 1 && decoded.data[0] == 0x00)
 				{
 					// Handshake, pass through
-					// But wait, handshake is sent via send_to_peer_async too, so it will be fragmented (1 frag)
-					// So it should have a header now.
-					// If we are upgrading, old peers might send without header.
-					// Let's assume strict new protocol for now.
 				}
 			}
 			else
@@ -192,22 +184,6 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 
 					if (frag_index < total_frags && !assembly.received_frags_mask[frag_index])
 					{
-						// Insert data at correct position
-						// We don't know the total size yet, so we might need to resize/insert
-						// A simple way is to store chunks in a map or vector of vectors, then merge
-						// But for simplicity, let's just append to a buffer if we receive in order?
-						// No, UDP is unordered.
-						
-						// Let's use a map of index -> data for this assembly temporarily?
-						// Or just resize the buffer if we can guess the size?
-						// We know MAX_FRAGMENT_SIZE.
-						
-						// Better approach: Store fragments in a map inside the assembly struct?
-						// For now, let's just assume we can resize the main buffer.
-						// But we don't know the exact offset without knowing previous fragment sizes.
-						// Wait, all fragments except the last MUST be MAX_FRAGMENT_SIZE for simple calc.
-						// Yes, sender logic enforces this.
-						
 						size_t offset = frag_index * MAX_FRAGMENT_SIZE;
 						if (assembly.data.size() < offset + payload_size)
 						{
@@ -610,14 +586,31 @@ void vpn_interface::read_from_tap()
 	{
 #ifdef _WIN32
 		auto packet = tap_adapter_->read();
+		if (!packet.empty())
+		{
+			// Windows TAP returns Ethernet frames. We need to strip the header for the tunnel (Layer 3).
+			// Ethernet header is 14 bytes: [Dest MAC(6)][Src MAC(6)][EtherType(2)]
+			if (packet.size() > 14)
+			{
+				uint16_t ether_type = (packet[12] << 8) | packet[13];
+				// IPv4 (0x0800) or IPv6 (0x86DD)
+				if (ether_type == 0x0800 || ether_type == 0x86DD)
+				{
+					// Strip Ethernet header
+					std::vector<uint8_t> ip_packet(packet.begin() + 14, packet.end());
+					tunnel_->broadcast(ip_packet);
+				}
+				// Ignore other types (ARP, etc.) as we are simulating a point-to-point IP link
+			}
+		}
 #else
 		auto packet = tun_adapter_->read();
-#endif
 		if (!packet.empty())
 		{
 			// Broadcast to all peers (simple hub mode)
 			tunnel_->broadcast(packet);
 		}
+#endif
 	}
 }
 
@@ -641,19 +634,65 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 		return;
 	}
 
-	// Write to adapter
 #ifdef _WIN32
-	tap_adapter_->write(data);
+	// Windows TAP expects Ethernet frames. We need to add a header.
+	// [Dest MAC(6)][Src MAC(6)][EtherType(2)][Payload...]
+	
+	std::vector<uint8_t> frame;
+	frame.reserve(14 + data.size());
+
+	// Dest MAC: The TAP adapter's MAC (so the OS accepts it)
+	auto tap_mac = tap_adapter_->get_mac();
+	if (tap_mac.size() == 6)
+	{
+		frame.insert(frame.end(), tap_mac.begin(), tap_mac.end());
+	}
+	else
+	{
+		// Fallback if we can't get MAC (shouldn't happen)
+		for(int i=0; i<6; ++i) frame.push_back(0xFF);
+	}
+
+	// Src MAC: Dummy (e.g., 00:00:00:00:00:01)
+	frame.push_back(0x00); frame.push_back(0x00); frame.push_back(0x00);
+	frame.push_back(0x00); frame.push_back(0x00); frame.push_back(0x01);
+
+	// EtherType
+	uint8_t version = (data[0] >> 4);
+	if (version == 4)
+	{
+		frame.push_back(0x08); frame.push_back(0x00); // IPv4
+	}
+	else if (version == 6)
+	{
+		frame.push_back(0x86); frame.push_back(0xDD); // IPv6
+	}
+	else
+	{
+		// Unknown packet type, drop
+		return;
+	}
+
+	// Payload
+	frame.insert(frame.end(), data.begin(), data.end());
+
+	if (!tap_adapter_->write(frame))
+	{
+		std::cout << "[VPN] Failed to write packet to TAP" << std::endl;
+	}
 #else
 	if (!tun_adapter_->write(data))
 	{
-		// Log failed writes with first byte to identify protocol
-		std::cerr << "[VPN] Failed to write packet to TUN: size=" << data.size() 
-				  << " first_byte=0x" << std::hex << (int)data[0] << std::dec << std::endl;
+		// Log failure details
+		std::cout << "[VPN] Failed to write packet to TUN: size=" << data.size();
+		if (!data.empty())
+		{
+			std::cout << " first_byte=0x" << std::hex << (int)data[0] << std::dec;
+		}
+		std::cout << std::endl;
 	}
 #endif
 }
 
 } // namespace udp
 } // namespace dixelu
-
