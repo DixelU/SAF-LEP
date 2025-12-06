@@ -72,6 +72,18 @@ bool TunAdapter::configure(const std::string& ip_address, const std::string& net
     std::cout << "Configuring IP: " << cmd << std::endl;
     if (system(cmd.c_str()) != 0) return false;
 
+    if (!gateway.empty())
+    {
+        std::cout << "Configuring Gateway: " << gateway << std::endl;
+        // Add routes for 0.0.0.0/1 and 128.0.0.0/1 to override default route
+        // without deleting the original one (which preserves the connection to the VPN server)
+        std::string route_cmd1 = "ip route add 0.0.0.0/1 via " + gateway;
+        std::string route_cmd2 = "ip route add 128.0.0.0/1 via " + gateway;
+        
+        system(route_cmd1.c_str());
+        system(route_cmd2.c_str());
+    }
+
     return set_status(true);
 }
 

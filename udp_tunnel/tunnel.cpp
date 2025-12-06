@@ -455,6 +455,14 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 	if (!running_)
 		return;
 
+	// Filter out control packets or too small packets (min IPv4 header is 20 bytes)
+	if (data.size() < 20)
+	{
+		// This might be a handshake packet (0x00) or other control data
+		// For now, just ignore it so we don't error out writing to TUN
+		return;
+	}
+
 	// Write to adapter
 #ifdef _WIN32
 	tap_adapter_->write(data);
