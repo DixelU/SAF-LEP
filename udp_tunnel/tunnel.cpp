@@ -548,6 +548,7 @@ bool vpn_interface::start(const std::string& ip, const std::string& mask, const 
 	try 
 	{
 		local_ip_ = boost::asio::ip::make_address_v4(ip);
+		std::cout << "[VPN] Local IP set to: " << local_ip_ << std::endl;
 	} 
 	catch(...)
 	{
@@ -695,12 +696,26 @@ void vpn_interface::handle_arp(const std::vector<uint8_t>& packet)
 				  << (int)spa[0] << "." << (int)spa[1] << "." << (int)spa[2] << "." << (int)spa[3] 
 				  << std::endl;
 
-		// Check if this is a DAD probe (Duplicate Address Detection) for our own IP
-		// If TPA matches our Local IP, we MUST NOT reply, otherwise Windows detects a conflict.
-		boost::asio::ip::address_v4 target_ip(std::array<unsigned char, 4>{tpa[0], tpa[1], tpa[2], tpa[3]});
-		if (target_ip == local_ip_)
+		// Check for DAD (Duplicate Address Detection)
+		// 1. If SPA is 0.0.0.0, it's a DAD probe.
+		// 2. If TPA matches our Local IP, it's a probe for our IP.
+		bool is_dad = false;
+		if (spa[0] == 0 && spa[1] == 0 && spa[2] == 0 && spa[3] == 0)
 		{
-			std::cout << "[VPN] Ignoring DAD probe for our own IP." << std::endl;
+			is_dad = true;
+		}
+		else
+		{
+			boost::asio::ip::address_v4 target_ip(std::array<unsigned char, 4>{tpa[0], tpa[1], tpa[2], tpa[3]});
+			if (target_ip == local_ip_)
+			{
+				is_dad = true;
+			}
+		}
+
+		if (is_dad)
+		{
+			std::cout << "[VPN] Ignoring DAD probe (SPA=0.0.0.0 or TPA=LocalIP)." << std::endl;
 			return;
 		}
 
