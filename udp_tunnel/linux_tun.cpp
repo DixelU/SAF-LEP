@@ -110,11 +110,7 @@ bool TunAdapter::set_status(bool connected)
 
 	if (connected)
 	{
-		// Set MTU to 150 to account for worst-case LEP expansion (8x)
-		// 150 * 8 + header ~= 1200+ bytes, safely fitting in 1500 MTU
-		std::string mtu_cmd = "ip link set dev " + dev_name_ + " mtu 150";
-		std::cout << "Configuring MTU: " << mtu_cmd << std::endl;
-		system(mtu_cmd.c_str());
+		// MTU left at default (usually 1500) as we now handle fragmentation internally
 	}
 
 	return true;

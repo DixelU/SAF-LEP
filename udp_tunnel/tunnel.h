@@ -114,6 +114,24 @@ private:
 	std::atomic<bool> running_{false};
 	std::thread io_thread_;
 
+	// Fragmentation support
+	struct fragment_assembly
+	{
+		std::vector<uint8_t> data;
+		size_t received_bytes = 0;
+		size_t total_expected_bytes = 0;
+		uint8_t total_frags = 0;
+		uint8_t received_frags_count = 0;
+		std::vector<bool> received_frags_mask;
+		std::chrono::steady_clock::time_point first_frag_time;
+	};
+
+	std::mutex reassembly_mutex_;
+	std::unordered_map<std::string, fragment_assembly> reassembly_buffer_;
+	std::atomic<uint16_t> next_packet_id_{0};
+
+	static constexpr size_t MAX_FRAGMENT_SIZE = 150;
+
 	static std::string endpoint_to_string(const boost::asio::ip::udp::endpoint& ep);
 };
 

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <algorithm>
 #include <iostream>
+#include <cstring>
 
 namespace dixelu
 {
@@ -139,9 +140,96 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 		}
 
 		// Call packet callback
-		if (packet_callback_ && !decoded.data.empty())
+		if (!decoded.data.empty())
 		{
-			packet_callback_(decoded.data, remote_endpoint_);
+			// Parse header: [PacketID(2)][FragIndex(1)][TotalFrags(1)]
+			if (decoded.data.size() < 4)
+			{
+				// std::cerr << "Received packet too small for fragment header" << std::endl;
+				// Treat as legacy/handshake if size 1 and 0x00?
+				// For now, just pass through if it looks like handshake
+				if (decoded.data.size() == 1 && decoded.data[0] == 0x00)
+				{
+					// Handshake, pass through
+					// But wait, handshake is sent via send_to_peer_async too, so it will be fragmented (1 frag)
+					// So it should have a header now.
+					// If we are upgrading, old peers might send without header.
+					// Let's assume strict new protocol for now.
+				}
+			}
+			else
+			{
+				uint16_t packet_id = (decoded.data[0] << 8) | decoded.data[1];
+				uint8_t frag_index = decoded.data[2];
+				uint8_t total_frags = decoded.data[3];
+				
+				// Payload starts at offset 4
+				size_t payload_size = decoded.data.size() - 4;
+
+				if (total_frags <= 1)
+				{
+					// Single fragment, pass directly
+					if (packet_callback_)
+					{
+						std::vector<uint8_t> payload(decoded.data.begin() + 4, decoded.data.end());
+						packet_callback_(payload, remote_endpoint_);
+					}
+				}
+				else
+				{
+					// Reassembly needed
+					std::lock_guard<std::mutex> lock(reassembly_mutex_);
+					std::string key = endpoint_to_string(remote_endpoint_) + ":" + std::to_string(packet_id);
+					
+					auto& assembly = reassembly_buffer_[key];
+					if (assembly.total_frags == 0)
+					{
+						// New assembly
+						assembly.total_frags = total_frags;
+						assembly.received_frags_mask.resize(total_frags, false);
+						assembly.first_frag_time = std::chrono::steady_clock::now();
+					}
+
+					if (frag_index < total_frags && !assembly.received_frags_mask[frag_index])
+					{
+						// Insert data at correct position
+						// We don't know the total size yet, so we might need to resize/insert
+						// A simple way is to store chunks in a map or vector of vectors, then merge
+						// But for simplicity, let's just append to a buffer if we receive in order?
+						// No, UDP is unordered.
+						
+						// Let's use a map of index -> data for this assembly temporarily?
+						// Or just resize the buffer if we can guess the size?
+						// We know MAX_FRAGMENT_SIZE.
+						
+						// Better approach: Store fragments in a map inside the assembly struct?
+						// For now, let's just assume we can resize the main buffer.
+						// But we don't know the exact offset without knowing previous fragment sizes.
+						// Wait, all fragments except the last MUST be MAX_FRAGMENT_SIZE for simple calc.
+						// Yes, sender logic enforces this.
+						
+						size_t offset = frag_index * MAX_FRAGMENT_SIZE;
+						if (assembly.data.size() < offset + payload_size)
+						{
+							assembly.data.resize(offset + payload_size);
+						}
+						
+						std::memcpy(assembly.data.data() + offset, decoded.data.data() + 4, payload_size);
+						assembly.received_frags_mask[frag_index] = true;
+						assembly.received_frags_count++;
+
+						if (assembly.received_frags_count == total_frags)
+						{
+							// Complete!
+							if (packet_callback_)
+							{
+								packet_callback_(assembly.data, remote_endpoint_);
+							}
+							reassembly_buffer_.erase(key);
+						}
+					}
+				}
+			}
 		}
 	}
 	catch (const std::exception& e)
@@ -158,31 +246,59 @@ void p2p_tunnel::send_to_peer(const std::vector<uint8_t>& data, const boost::asi
 	if (data.empty())
 		return;
 
-	// Get or create peer connection
-	auto& peer_conn = get_or_create_peer(peer);
-
-	// Encode with LEP
-	uint16_t index;
+	// Calculate fragments
+	size_t total_size = data.size();
+	size_t num_frags = (total_size + MAX_FRAGMENT_SIZE - 1) / MAX_FRAGMENT_SIZE;
+	
+	if (num_frags > 255)
 	{
-		std::lock_guard<std::mutex> lock(peer_conn.mutex);
-		index = peer_conn.next_send_index++;
-	}
-
-	auto encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::encode(
-		data.data(), data.size(), index);
-
-	if (encoded.empty())
-	{
-		std::cerr << "LEP encode failed" << std::endl;
+		std::cerr << "Packet too large to fragment (max 255 fragments)" << std::endl;
 		return;
 	}
 
-	// Send synchronously
-	boost::system::error_code ec;
-	socket_.send_to(boost::asio::buffer(encoded), peer, 0, ec);
-	if (ec)
+	uint16_t packet_id = next_packet_id_++;
+	uint8_t total_frags_u8 = static_cast<uint8_t>(num_frags);
+
+	for (size_t i = 0; i < num_frags; ++i)
 	{
-		std::cerr << "Send error: " << ec.message() << std::endl;
+		size_t offset = i * MAX_FRAGMENT_SIZE;
+		size_t chunk_size = std::min(MAX_FRAGMENT_SIZE, total_size - offset);
+
+		// Prepare payload with header: [PacketID(2)][FragIndex(1)][TotalFrags(1)][Data...]
+		std::vector<uint8_t> payload;
+		payload.reserve(4 + chunk_size);
+		payload.push_back((packet_id >> 8) & 0xFF);
+		payload.push_back(packet_id & 0xFF);
+		payload.push_back(static_cast<uint8_t>(i));
+		payload.push_back(total_frags_u8);
+		payload.insert(payload.end(), data.begin() + offset, data.begin() + offset + chunk_size);
+
+		// Get or create peer connection
+		auto& peer_conn = get_or_create_peer(peer);
+
+		// Encode with LEP
+		uint16_t index;
+		{
+			std::lock_guard<std::mutex> lock(peer_conn.mutex);
+			index = peer_conn.next_send_index++;
+		}
+
+		auto encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::encode(
+			payload.data(), payload.size(), index);
+
+		if (encoded.empty())
+		{
+			std::cerr << "LEP encode failed" << std::endl;
+			continue;
+		}
+
+		// Send synchronously
+		boost::system::error_code ec;
+		socket_.send_to(boost::asio::buffer(encoded), peer, 0, ec);
+		if (ec)
+		{
+			std::cerr << "Send error: " << ec.message() << std::endl;
+		}
 	}
 }
 
@@ -191,34 +307,62 @@ void p2p_tunnel::send_to_peer_async(const std::vector<uint8_t>& data, const boos
 	if (data.empty())
 		return;
 
-	// Get or create peer connection
-	auto& peer_conn = get_or_create_peer(peer);
+	// Calculate fragments
+	size_t total_size = data.size();
+	size_t num_frags = (total_size + MAX_FRAGMENT_SIZE - 1) / MAX_FRAGMENT_SIZE;
 
-	// Encode with LEP
-	uint16_t index;
+	if (num_frags > 255)
 	{
-		std::lock_guard<std::mutex> lock(peer_conn.mutex);
-		index = peer_conn.next_send_index++;
-	}
-
-	auto encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::encode(
-		data.data(), data.size(), index);
-
-	if (encoded.empty())
-	{
-		std::cerr << "LEP encode failed" << std::endl;
+		std::cerr << "Packet too large to fragment (max 255 fragments)" << std::endl;
 		return;
 	}
 
-	// Create shared buffer for async operation
-	auto buffer = std::make_shared<std::vector<uint8_t>>(std::move(encoded));
+	uint16_t packet_id = next_packet_id_++;
+	uint8_t total_frags_u8 = static_cast<uint8_t>(num_frags);
 
-	socket_.async_send_to(
-		boost::asio::buffer(*buffer),
-		peer,
-		[this, buffer, peer](const boost::system::error_code& error, std::size_t bytes_transferred) {
-			handle_send(error, bytes_transferred, buffer, peer);
-		});
+	for (size_t i = 0; i < num_frags; ++i)
+	{
+		size_t offset = i * MAX_FRAGMENT_SIZE;
+		size_t chunk_size = std::min(MAX_FRAGMENT_SIZE, total_size - offset);
+
+		// Prepare payload with header: [PacketID(2)][FragIndex(1)][TotalFrags(1)][Data...]
+		std::vector<uint8_t> payload;
+		payload.reserve(4 + chunk_size);
+		payload.push_back((packet_id >> 8) & 0xFF);
+		payload.push_back(packet_id & 0xFF);
+		payload.push_back(static_cast<uint8_t>(i));
+		payload.push_back(total_frags_u8);
+		payload.insert(payload.end(), data.begin() + offset, data.begin() + offset + chunk_size);
+
+		// Get or create peer connection
+		auto& peer_conn = get_or_create_peer(peer);
+
+		// Encode with LEP
+		uint16_t index;
+		{
+			std::lock_guard<std::mutex> lock(peer_conn.mutex);
+			index = peer_conn.next_send_index++;
+		}
+
+		auto encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::encode(
+			payload.data(), payload.size(), index);
+
+		if (encoded.empty())
+		{
+			std::cerr << "LEP encode failed" << std::endl;
+			continue;
+		}
+
+		// Create shared buffer for async operation
+		auto buffer = std::make_shared<std::vector<uint8_t>>(std::move(encoded));
+
+		socket_.async_send_to(
+			boost::asio::buffer(*buffer),
+			peer,
+			[this, buffer, peer](const boost::system::error_code& error, std::size_t bytes_transferred) {
+				handle_send(error, bytes_transferred, buffer, peer);
+			});
+	}
 }
 
 void p2p_tunnel::handle_send(const boost::system::error_code& error, std::size_t bytes_transferred,
