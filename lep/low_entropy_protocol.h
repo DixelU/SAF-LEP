@@ -6,7 +6,6 @@
 #include <vector>
 #include <span>
 #include <cstdint>
-#include <print>
 #include <stdexcept>
 
 namespace dixelu

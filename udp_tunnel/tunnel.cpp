@@ -1,7 +1,7 @@
 #include "tunnel.h"
 #include <chrono>
 #include <algorithm>
-#include <print>
+#include <iostream>
 
 namespace dixelu
 {
@@ -22,19 +22,21 @@ p2p_tunnel::p2p_tunnel(uint16_t local_port)
 	socket_.open(boost::asio::ip::udp::v4(), ec);
 	if (ec)
 	{
-		std::println(stderr, "Failed to open socket: {}", ec.message());
+		std::cerr << "Failed to open socket: " << ec.message() << std::endl;
 		return;
 	}
 
 	socket_.bind(local_endpoint_, ec);
 	if (ec)
 	{
-		std::println(stderr, "Failed to bind socket: {}", ec.message());
+		std::cerr << "Failed to bind socket: " << ec.message() << std::endl;
 		return;
 	}
 
 	local_endpoint_ = socket_.local_endpoint();
 }
+
+// ... (destructor and start/stop methods unchanged) ...
 
 p2p_tunnel::~p2p_tunnel()
 {
@@ -99,7 +101,7 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 	{
 		if (error != boost::asio::error::operation_aborted && running_)
 		{
-			std::println(stderr, "Receive error: {}", error.message());
+			std::cerr << "Receive error: " << error.message() << std::endl;
 		}
 		return;
 	}
@@ -141,7 +143,7 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 	}
 	catch (const std::exception& e)
 	{
-		std::println(stderr, "LEP decode error: {}", e.what());
+		std::cerr << "LEP decode error: " << e.what() << std::endl;
 	}
 
 	// Continue receiving
@@ -168,7 +170,7 @@ void p2p_tunnel::send_to_peer(const std::vector<uint8_t>& data, const boost::asi
 
 	if (encoded.empty())
 	{
-		std::println(stderr, "LEP encode failed");
+		std::cerr << "LEP encode failed" << std::endl;
 		return;
 	}
 
@@ -177,7 +179,7 @@ void p2p_tunnel::send_to_peer(const std::vector<uint8_t>& data, const boost::asi
 	socket_.send_to(boost::asio::buffer(encoded), peer, 0, ec);
 	if (ec)
 	{
-		std::println(stderr, "Send error: {}", ec.message());
+		std::cerr << "Send error: " << ec.message() << std::endl;
 	}
 }
 
@@ -201,7 +203,7 @@ void p2p_tunnel::send_to_peer_async(const std::vector<uint8_t>& data, const boos
 
 	if (encoded.empty())
 	{
-		std::println(stderr, "LEP encode failed");
+		std::cerr << "LEP encode failed" << std::endl;
 		return;
 	}
 
@@ -221,7 +223,7 @@ void p2p_tunnel::handle_send(const boost::system::error_code& error, std::size_t
 {
 	if (error)
 	{
-		std::println(stderr, "Async send error to {}: {}", endpoint_to_string(target), error.message());
+		std::cerr << "Async send error to " << endpoint_to_string(target) << ": " << error.message() << std::endl;
 	}
 }
 
@@ -239,24 +241,23 @@ void p2p_tunnel::broadcast(const std::vector<uint8_t>& data)
 
 void p2p_tunnel::connect_to_peer(const std::string& address, const std::string& port)
 {
+	boost::asio::ip::udp::resolver::query query(boost::asio::ip::udp::v4(), address, port);
 	resolver_.async_resolve(
-		boost::asio::ip::udp::v4(),
-		address,
-		port,
-		[this](const boost::system::error_code& ec, boost::asio::ip::udp::resolver::results_type results) {
+		query,
+		[this](const boost::system::error_code& ec, boost::asio::ip::udp::resolver::iterator iterator) {
 			if (ec)
 			{
-				std::println(stderr, "Resolve error: {}", ec.message());
+				std::cerr << "Resolve error: " << ec.message() << std::endl;
 				return;
 			}
 
-			if (results.empty())
+			if (iterator == boost::asio::ip::udp::resolver::iterator())
 			{
-				std::println(stderr, "No endpoints resolved");
+				std::cerr << "No endpoints resolved" << std::endl;
 				return;
 			}
 
-			connect_to_peer(*results.begin());
+			connect_to_peer(*iterator);
 		});
 }
 
@@ -279,6 +280,8 @@ void p2p_tunnel::connect_to_peer(const boost::asio::ip::udp::endpoint& endpoint)
 		connection_callback_(endpoint);
 	}
 }
+
+// ... (rest of p2p_tunnel methods unchanged) ...
 
 boost::asio::ip::udp::endpoint p2p_tunnel::get_local_endpoint() const
 {
@@ -347,6 +350,11 @@ void p2p_tunnel::update_peer_activity(const boost::asio::ip::udp::endpoint& endp
 // VPN Interface Implementation
 vpn_interface::vpn_interface(std::shared_ptr<p2p_tunnel> tunnel)
 	: tunnel_(std::move(tunnel))
+#ifdef _WIN32
+	, tap_adapter_(std::make_unique<TapAdapter>())
+#else
+	, tun_adapter_(std::make_unique<TunAdapter>())
+#endif
 {
 }
 
@@ -355,45 +363,104 @@ vpn_interface::~vpn_interface()
 	stop();
 }
 
-void vpn_interface::start()
+bool vpn_interface::start(const std::string& ip, const std::string& mask, const std::string& gateway)
 {
 	if (running_.exchange(true))
-		return;
+		return true;
 
-	// Set up tunnel callback to forward packets to network interface
+#ifdef _WIN32
+	// Open TAP adapter
+	if (!tap_adapter_->open())
+	{
+		std::cerr << "Failed to open TAP adapter" << std::endl;
+		running_ = false;
+		return false;
+	}
+
+	// Configure IP
+	if (!tap_adapter_->configure(ip, mask, gateway))
+	{
+		std::cerr << "Failed to configure TAP adapter IP" << std::endl;
+		running_ = false;
+		return false;
+	}
+
+	// Set status to connected
+	if (!tap_adapter_->set_status(true))
+	{
+		std::cerr << "Failed to set TAP adapter status" << std::endl;
+		running_ = false;
+		return false;
+	}
+#else
+	// Open TUN adapter
+	if (!tun_adapter_->open())
+	{
+		std::cerr << "Failed to open TUN adapter" << std::endl;
+		running_ = false;
+		return false;
+	}
+
+	// Configure IP
+	if (!tun_adapter_->configure(ip, mask, gateway))
+	{
+		std::cerr << "Failed to configure TUN adapter IP" << std::endl;
+		running_ = false;
+		return false;
+	}
+#endif
+
+	// Set up tunnel callback to forward packets to adapter
 	tunnel_->set_packet_received_callback(
 		[this](const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& from) {
 			handle_tunnel_packet(data, from);
 		});
+
+	// Start reading from adapter
+	read_thread_ = std::thread(&vpn_interface::read_from_tap, this);
+
+	return true;
 }
 
 void vpn_interface::stop()
 {
 	if (!running_.exchange(false))
 		return;
+
+	if (read_thread_.joinable())
+	{
+		read_thread_.detach(); 
+	}
 }
 
-void vpn_interface::inject_packet(const std::vector<uint8_t>& packet)
+void vpn_interface::read_from_tap()
 {
-	if (!running_ || !tunnel_)
-		return;
-
-	// Forward packet through tunnel to all connected peers
-	tunnel_->broadcast(packet);
-}
-
-void vpn_interface::set_packet_output_callback(std::function<void(const std::vector<uint8_t>&)> cb)
-{
-	output_callback_ = std::move(cb);
+	while (running_)
+	{
+#ifdef _WIN32
+		auto packet = tap_adapter_->read();
+#else
+		auto packet = tun_adapter_->read();
+#endif
+		if (!packet.empty())
+		{
+			// Broadcast to all peers (simple hub mode)
+			tunnel_->broadcast(packet);
+		}
+	}
 }
 
 void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& from)
 {
-	if (!running_ || !output_callback_)
+	if (!running_)
 		return;
 
-	// Forward decrypted packet to network interface
-	output_callback_(data);
+	// Write to adapter
+#ifdef _WIN32
+	tap_adapter_->write(data);
+#else
+	tun_adapter_->write(data);
+#endif
 }
 
 } // namespace udp

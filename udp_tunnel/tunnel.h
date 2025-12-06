@@ -17,6 +17,12 @@
 
 #include "../lep/low_entropy_protocol.h"
 
+#ifdef _WIN32
+#include "windows_tap.h"
+#else
+#include "linux_tun.h"
+#endif
+
 namespace dixelu
 {
 namespace udp
@@ -91,7 +97,7 @@ private:
 	peer_connection& get_or_create_peer(const boost::asio::ip::udp::endpoint& endpoint);
 	void update_peer_activity(const boost::asio::ip::udp::endpoint& endpoint);
 
-	boost::asio::io_context io_context_;
+	boost::asio::io_service io_context_; // Changed from io_context to io_service for Boost 1.65 compatibility
 	boost::asio::ip::udp::socket socket_;
 	boost::asio::ip::udp::resolver resolver_;
 	boost::asio::ip::udp::endpoint local_endpoint_;
@@ -118,20 +124,21 @@ public:
 	explicit vpn_interface(std::shared_ptr<p2p_tunnel> tunnel);
 	~vpn_interface();
 
-	void start();
+	// Start the VPN interface
+	bool start(const std::string& ip, const std::string& mask, const std::string& gateway = "");
 	void stop();
-
-	// Inject packet from network interface (simulated)
-	void inject_packet(const std::vector<uint8_t>& packet);
-
-	// Set callback for packets to be sent to network interface
-	void set_packet_output_callback(std::function<void(const std::vector<uint8_t>&)> cb);
 
 private:
 	std::shared_ptr<p2p_tunnel> tunnel_;
-	std::function<void(const std::vector<uint8_t>&)> output_callback_;
+#ifdef _WIN32
+	std::unique_ptr<TapAdapter> tap_adapter_;
+#else
+	std::unique_ptr<TunAdapter> tun_adapter_;
+#endif
 	std::atomic<bool> running_{false};
+	std::thread read_thread_;
 
+	void read_from_tap();
 	void handle_tunnel_packet(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& from);
 };
 
