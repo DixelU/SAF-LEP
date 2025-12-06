@@ -72,6 +72,9 @@ bool TunAdapter::configure(const std::string& ip_address, const std::string& net
     std::cout << "Configuring IP: " << cmd << std::endl;
     if (system(cmd.c_str()) != 0) return false;
 
+    // Bring interface UP before adding routes
+    if (!set_status(true)) return false;
+
     if (!gateway.empty())
     {
         std::cout << "Configuring Gateway: " << gateway << std::endl;
@@ -84,7 +87,7 @@ bool TunAdapter::configure(const std::string& ip_address, const std::string& net
         system(route_cmd2.c_str());
     }
 
-    return set_status(true);
+    return true;
 }
 
 bool TunAdapter::set_status(bool connected) {
