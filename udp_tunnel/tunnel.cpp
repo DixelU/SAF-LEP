@@ -115,6 +115,8 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 	// Update peer activity
 	update_peer_activity(remote_endpoint_);
 
+	std::cout << "[Tunnel] Received " << bytes_transferred << " bytes from " << endpoint_to_string(remote_endpoint_) << std::endl;
+
 	// Decode LEP packet
 	try
 	{
@@ -229,7 +231,7 @@ void p2p_tunnel::handle_send(const boost::system::error_code& error, std::size_t
 
 void p2p_tunnel::broadcast(const std::vector<uint8_t>& data)
 {
-	std::lock_guard<std::mutex> lock(peers_mutex_);
+	std::lock_guard<std::recursive_mutex> lock(peers_mutex_);
 	for (const auto& [key, peer] : peers_)
 	{
 		if (peer->is_connected)
@@ -300,7 +302,7 @@ void p2p_tunnel::set_connection_callback(connection_callback cb)
 
 std::vector<boost::asio::ip::udp::endpoint> p2p_tunnel::get_connected_peers() const
 {
-	std::lock_guard<std::mutex> lock(peers_mutex_);
+	std::lock_guard<std::recursive_mutex> lock(peers_mutex_);
 	std::vector<boost::asio::ip::udp::endpoint> result;
 	for (const auto& [key, peer] : peers_)
 	{
@@ -314,7 +316,7 @@ std::vector<boost::asio::ip::udp::endpoint> p2p_tunnel::get_connected_peers() co
 
 bool p2p_tunnel::is_peer_connected(const boost::asio::ip::udp::endpoint& peer) const
 {
-	std::lock_guard<std::mutex> lock(peers_mutex_);
+	std::lock_guard<std::recursive_mutex> lock(peers_mutex_);
 	auto key = endpoint_to_string(peer);
 	auto it = peers_.find(key);
 	return it != peers_.end() && it->second->is_connected;
@@ -322,7 +324,7 @@ bool p2p_tunnel::is_peer_connected(const boost::asio::ip::udp::endpoint& peer) c
 
 peer_connection& p2p_tunnel::get_or_create_peer(const boost::asio::ip::udp::endpoint& endpoint)
 {
-	std::lock_guard<std::mutex> lock(peers_mutex_);
+	std::lock_guard<std::recursive_mutex> lock(peers_mutex_);
 	auto key = endpoint_to_string(endpoint);
 	auto it = peers_.find(key);
 	if (it == peers_.end())

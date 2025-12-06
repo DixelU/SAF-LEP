@@ -105,7 +105,7 @@ private:
 	std::array<uint8_t, 65507> receive_buffer_;
 	boost::asio::ip::udp::endpoint remote_endpoint_;
 
-	mutable std::mutex peers_mutex_;
+	mutable std::recursive_mutex peers_mutex_;
 	std::unordered_map<std::string, std::shared_ptr<peer_connection>> peers_;
 
 	packet_received_callback packet_callback_;
