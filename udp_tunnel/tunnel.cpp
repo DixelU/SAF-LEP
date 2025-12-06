@@ -392,6 +392,25 @@ void p2p_tunnel::broadcast(const std::vector<uint8_t>& data)
 
 void p2p_tunnel::connect_to_peer(const std::string& address, const std::string& port)
 {
+#if BOOST_VERSION >= 106600
+	resolver_.async_resolve(
+		address, port,
+		[this](const boost::system::error_code& ec, boost::asio::ip::udp::resolver::results_type results) {
+			if (ec)
+			{
+				std::cerr << "Resolve error: " << ec.message() << std::endl;
+				return;
+			}
+
+			if (results.empty())
+			{
+				std::cerr << "No endpoints resolved" << std::endl;
+				return;
+			}
+
+			connect_to_peer(*results.begin());
+		});
+#else
 	boost::asio::ip::udp::resolver::query query(boost::asio::ip::udp::v4(), address, port);
 	resolver_.async_resolve(
 		query,
@@ -410,6 +429,7 @@ void p2p_tunnel::connect_to_peer(const std::string& address, const std::string& 
 
 			connect_to_peer(*iterator);
 		});
+#endif
 }
 
 void p2p_tunnel::connect_to_peer(const boost::asio::ip::udp::endpoint& endpoint)

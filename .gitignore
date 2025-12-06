@@ -3,3 +3,5 @@
 *build*
 .vs
 SAF-LEP-ExPuN/*
+x64/*
+x86/*

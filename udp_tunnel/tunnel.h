@@ -4,6 +4,7 @@
 #define SAF_LEP_P2P_TUNNEL_H
 
 #include <boost/asio.hpp>
+#include <boost/version.hpp>
 #include <memory>
 #include <functional>
 #include <unordered_map>
@@ -97,7 +98,7 @@ private:
 	peer_connection& get_or_create_peer(const boost::asio::ip::udp::endpoint& endpoint);
 	void update_peer_activity(const boost::asio::ip::udp::endpoint& endpoint);
 
-	boost::asio::io_service io_context_; // Changed from io_context to io_service for Boost 1.65 compatibility
+	boost::asio::io_context io_context_;
 	boost::asio::ip::udp::socket socket_;
 	boost::asio::ip::udp::resolver resolver_;
 	boost::asio::ip::udp::endpoint local_endpoint_;

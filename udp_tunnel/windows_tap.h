@@ -4,8 +4,6 @@
 #include <vector>
 #include <memory>
 #include <functional>
-#include <windows.h>
-#include <winioctl.h>
 
 #ifdef _WIN32
 
@@ -39,7 +37,7 @@ public:
 	bool set_status(bool connected);
 
 private:
-	HANDLE handle_;
+	void* handle_;
 	std::string adapter_name_;
 	std::string adapter_guid_;
 
