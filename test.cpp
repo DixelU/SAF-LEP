@@ -20,6 +20,7 @@ void print_usage(const char* program_name)
 	std::cout << "      --gw GATEWAY              VPN Gateway (optional)" << std::endl;
 	std::cout << "  -h, --help                    Show this help message" << std::endl;
 	std::cout << "\nExamples:" << std::endl;
+
 	std::cout << "  " << program_name << 
 		" -p 5000 --ip 10.0.0.1               # Run as server/peer 1" << std::endl;
 	std::cout << "  " << program_name << 

@@ -802,9 +802,10 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 		for(int i=0; i<6; ++i) frame.push_back(0xFF);
 	}
 
-	// Src MAC: Dummy (e.g., 00:00:00:00:00:01)
-	frame.push_back(0x00); frame.push_back(0x00); frame.push_back(0x00);
-	frame.push_back(0x00); frame.push_back(0x00); frame.push_back(0x01);
+	// Src MAC: Dummy (Must match the one used in ARP reply!)
+	// User requested: 0E-13-37-30-BE-EF
+	frame.push_back(0x0E); frame.push_back(0x13); frame.push_back(0x37);
+	frame.push_back(0x30); frame.push_back(0xBE); frame.push_back(0xEF);
 
 	// EtherType
 	uint8_t version = (data[0] >> 4);
