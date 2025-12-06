@@ -161,6 +161,13 @@ bool TapAdapter::configure(const std::string& ip_address, const std::string& net
 	if (!gateway.empty())
 	{
 		std::cout << "Configuring Gateway: " << gateway << std::endl;
+		
+		// Clear potential old routes first to avoid "Object already exists" errors
+		std::string del_cmd1 = "route delete 0.0.0.0 mask 128.0.0.0";
+		std::string del_cmd2 = "route delete 128.0.0.0 mask 128.0.0.0";
+		system(del_cmd1.c_str());
+		system(del_cmd2.c_str());
+
 		// Add routes for 0.0.0.0/1 and 128.0.0.0/1 to override default route
 		// route add 0.0.0.0 mask 128.0.0.0 <GATEWAY> metric 1
 		// route add 128.0.0.0 mask 128.0.0.0 <GATEWAY> metric 1
