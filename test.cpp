@@ -1,11 +1,13 @@
-#include "lep/low_entropy_protocol.h"
-#include "udp_tunnel/tunnel.h"
-
 #include <iostream>
 #include <string>
 #include <thread>
 #include <chrono>
 #include <vector>
+
+#include "lep/low_entropy_protocol.h"
+
+#include "udp_tunnel/tunnel.h"
+#include "udp_tunnel/global_flags.h"
 
 using namespace dixelu::udp;
 
@@ -15,6 +17,7 @@ void print_usage(const char* program_name)
 	std::cout << "Options:" << std::endl;
 	std::cout << "  -p, --port PORT               Local UDP port (default: 0 = auto)" << std::endl;
 	std::cout << "  -c, --connect HOST:PORT       Connect to peer" << std::endl;
+	std::cout << "  -v, --verbose                 Enable verbose logging" << std::endl;
 	std::cout << "      --ip IP                   VPN IP address (e.g. 10.0.0.1)" << std::endl;
 	std::cout << "      --mask MASK               VPN Subnet mask (default: 255.255.255.0)" << std::endl;
 	std::cout << "      --gw GATEWAY              VPN Gateway (optional)" << std::endl;
@@ -51,6 +54,10 @@ int main(int argc, char* argv[])
 		else if (arg == "-c" || arg == "--connect")
 		{
 			if (i + 1 < argc) connect_to = argv[++i];
+		}
+		else if (arg == "-v" || arg == "--verbose")
+		{
+			VERBOSE_MODE = true;
 		}
 		else if (arg == "--ip")
 		{

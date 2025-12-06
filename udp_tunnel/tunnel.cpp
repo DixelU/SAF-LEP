@@ -6,6 +6,8 @@
 #include <cstring>
 #include <iomanip>
 
+#include "global_flags.h"
+
 namespace dixelu
 {
 namespace udp
@@ -115,8 +117,9 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 
 	// Update peer activity
 	update_peer_activity(remote_endpoint_);
-
-	std::cout << "[Tunnel] Received " << bytes_transferred << " bytes from " << endpoint_to_string(remote_endpoint_) << std::endl;
+	
+	if (VERBOSE_MODE)
+		std::cout << "[Tunnel] Received " << bytes_transferred << " bytes from " << endpoint_to_string(remote_endpoint_) << std::endl;
 
 	// Decode LEP packet
 	try
@@ -361,7 +364,10 @@ void p2p_tunnel::broadcast(const std::vector<uint8_t>& data)
 		if (peer->is_connected)
 		{
 			send_to_peer_async(data, peer->endpoint);
-			std::cout << "[Tunnel] Broadcasting " << data.size() << " bytes to " << peer->endpoint << std::endl;
+
+			if (VERBOSE_MODE)
+				std::cout << "[Tunnel] Broadcasting " << data.size() << " bytes to " << peer->endpoint << std::endl;
+
 			sent_count++;
 		}
 	}
@@ -548,7 +554,8 @@ bool vpn_interface::start(const std::string& ip, const std::string& mask, const 
 	try 
 	{
 		local_ip_ = boost::asio::ip::make_address_v4(ip);
-		std::cout << "[VPN] Local IP set to: " << local_ip_ << std::endl;
+		if (VERBOSE_MODE)
+			std::cout << "[VPN] Local IP set to: " << local_ip_ << std::endl;
 	} 
 	catch(...)
 	{
@@ -614,7 +621,10 @@ void vpn_interface::read_from_tap()
 				{
 					// Strip Ethernet header
 					std::vector<uint8_t> ip_packet(packet.begin() + 14, packet.end());
-					std::cout << "[VPN] TAP -> Tunnel: IP packet size=" << ip_packet.size() << std::endl;
+
+					if (VERBOSE_MODE)
+						std::cout << "[VPN] TAP -> Tunnel: IP packet size=" << ip_packet.size() << std::endl;
+
 					tunnel_->broadcast(ip_packet);
 				}
 				else if (ether_type == 0x0806) // ARP
@@ -624,7 +634,8 @@ void vpn_interface::read_from_tap()
 				else
 				{
 					// Log ignored packet types
-					std::cout << "[VPN] Ignored packet with EtherType: 0x" << std::hex << ether_type << std::dec << std::endl;
+					if (VERBOSE_MODE)
+						std::cout << "[VPN] Ignored packet with EtherType: 0x" << std::hex << ether_type << std::dec << std::endl;
 				}
 			}
 		}
@@ -665,7 +676,8 @@ void vpn_interface::handle_arp(const std::vector<uint8_t>& packet)
 		// Target IP (TPA)
 		const uint8_t* tpa = arp_ptr + 24;
 
-		std::cout << "[VPN] ARP Request: Who has " 
+		if (VERBOSE_MODE)
+			std::cout << "[VPN] ARP Request: Who has " 
 				  << (int)tpa[0] << "." << (int)tpa[1] << "." << (int)tpa[2] << "." << (int)tpa[3] 
 				  << "? Tell " 
 				  << (int)spa[0] << "." << (int)spa[1] << "." << (int)spa[2] << "." << (int)spa[3] 
@@ -690,7 +702,8 @@ void vpn_interface::handle_arp(const std::vector<uint8_t>& packet)
 
 		if (is_dad)
 		{
-			std::cout << "[VPN] Ignoring DAD probe (SPA=0.0.0.0 or TPA=LocalIP)." << std::endl;
+			if (VERBOSE_MODE)
+				std::cout << "[VPN] Ignoring DAD probe (SPA=0.0.0.0 or TPA=LocalIP)." << std::endl;
 			return;
 		}
 
@@ -731,7 +744,8 @@ void vpn_interface::handle_arp(const std::vector<uint8_t>& packet)
 		std::memcpy(r_ptr + 24, spa, 4);
 
 		// Send reply
-		std::cout << "[VPN] Sending ARP Reply for " 
+		if (VERBOSE_MODE)
+			std::cout << "[VPN] Sending ARP Reply for " 
 				  << (int)tpa[0] << "." << (int)tpa[1] << "." << (int)tpa[2] << "." << (int)tpa[3] << std::endl;
 		tap_adapter_->write(reply);
 	}
@@ -749,13 +763,28 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 		// This might be a handshake packet (0x00) or other control data
 		if (data.size() == 1 && data[0] == 0x00)
 		{
-			std::cout << "[VPN] Handshake packet received (ignored)" << std::endl;
+			if (VERBOSE_MODE)
+				std::cout << "[VPN] Handshake packet received (ignored)" << std::endl;
 		}
 		else
 		{
-			std::cout << "[VPN] Dropping small packet: size=" << data.size() << std::endl;
+			if (VERBOSE_MODE)
+				std::cout << "[VPN] Dropping small packet: size=" << data.size() << std::endl;
 		}
 		return;
+	}
+
+	if (VERBOSE_MODE)
+	{
+		std::cout << "[VPN] Tunnel -> TAP: IP packet size=" << data.size() << std::endl;
+
+		// Hex dump the first 60 bytes of the IP packet for debugging
+		std::cout << "    Hex: ";
+		for (size_t i = 0; i < std::min((size_t)60, data.size()); ++i)
+		{
+			std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
+		}
+		std::cout << std::dec << std::endl;
 	}
 
 #ifdef _WIN32
@@ -774,7 +803,8 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 	else
 	{
 		// Fallback if we can't get MAC (shouldn't happen)
-		for(int i=0; i<6; ++i) frame.push_back(0xFF);
+		for(int i = 0; i < 6; ++i)
+			frame.push_back(0xFF);
 	}
 
 	// Src MAC: Dummy (Must match the one used in ARP reply!)
@@ -786,11 +816,13 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 	uint8_t version = (data[0] >> 4);
 	if (version == 4)
 	{
-		frame.push_back(0x08); frame.push_back(0x00); // IPv4
+		frame.push_back(0x08);
+		frame.push_back(0x00); // IPv4
 	}
 	else if (version == 6)
 	{
-		frame.push_back(0x86); frame.push_back(0xDD); // IPv6
+		frame.push_back(0x86);
+		frame.push_back(0xDD); // IPv6
 	}
 	else
 	{
@@ -801,28 +833,11 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 	// Payload
 	frame.insert(frame.end(), data.begin(), data.end());
 
-	std::cout << "[VPN] Tunnel -> TAP: IP packet size=" << data.size() << std::endl;
-	
-	// Hex dump the first 60 bytes of the IP packet for debugging
-	std::cout << "    Hex: ";
-	for (size_t i = 0; i < std::min((size_t)60, data.size()); ++i)
-	{
-		std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
-	}
-	std::cout << std::dec << std::endl;
-
 	if (!tap_adapter_->write(frame))
 	{
 		std::cout << "[VPN] Failed to write packet to TAP" << std::endl;
 	}
 #else
-	// Hex dump the first 60 bytes of the IP packet for debugging
-	std::cout << "    Hex: ";
-	for (size_t i = 0; i < std::min((size_t)60, data.size()); ++i)
-	{
-		std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
-	}
-	std::cout << std::dec << std::endl;
 
 	if (!tun_adapter_->write(data))
 	{

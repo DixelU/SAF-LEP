@@ -12,6 +12,8 @@
 #include <windows.h>
 #include <iphlpapi.h>
 
+#include "global_flags.h"
+
 #pragma comment(lib, "ws2_32")
 #pragma comment(lib, "Iphlpapi.lib")
 

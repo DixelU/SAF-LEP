@@ -12,6 +12,8 @@
 #include <linux/if_tun.h>
 #include <arpa/inet.h>
 
+#include "global_flags.h"
+
 namespace dixelu
 {
 namespace udp
@@ -55,7 +57,8 @@ bool TunAdapter::open(const std::string& dev_name)
 
 	fd_ = fd;
 	dev_name_ = ifr.ifr_name;
-	std::cout << "Opened TUN device: " << dev_name_ << std::endl;
+	if (VERBOSE_MODE)
+		std::cout << "Opened TUN device: " << dev_name_ << std::endl;
 	return true;
 }
 
