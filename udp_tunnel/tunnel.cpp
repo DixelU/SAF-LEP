@@ -459,7 +459,14 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 	if (data.size() < 20)
 	{
 		// This might be a handshake packet (0x00) or other control data
-		// For now, just ignore it so we don't error out writing to TUN
+		if (data.size() == 1 && data[0] == 0x00)
+		{
+			std::cout << "[VPN] Handshake packet received (ignored)" << std::endl;
+		}
+		else
+		{
+			std::cout << "[VPN] Dropping small packet: size=" << data.size() << std::endl;
+		}
 		return;
 	}
 
@@ -467,7 +474,12 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 #ifdef _WIN32
 	tap_adapter_->write(data);
 #else
-	tun_adapter_->write(data);
+	if (!tun_adapter_->write(data))
+	{
+		// Log failed writes with first byte to identify protocol
+		std::cerr << "[VPN] Failed to write packet to TUN: size=" << data.size() 
+				  << " first_byte=0x" << std::hex << (int)data[0] << std::dec << std::endl;
+	}
 #endif
 }
 

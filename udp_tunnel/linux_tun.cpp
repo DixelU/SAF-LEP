@@ -114,7 +114,9 @@ bool TunAdapter::write(const std::vector<uint8_t>& data) {
 
     ssize_t nwritten = ::write(fd_, data.data(), data.size());
     if (nwritten < 0) {
-        std::cerr << "Write to TUN failed: " << strerror(errno) << std::endl;
+        std::cerr << "Write to TUN failed: " << strerror(errno) 
+                  << " (size=" << data.size() << ", first_byte=0x" 
+                  << std::hex << (int)data[0] << std::dec << ")" << std::endl;
         return false;
     }
 
