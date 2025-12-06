@@ -656,13 +656,13 @@ void vpn_interface::handle_arp(const std::vector<uint8_t>& packet)
 		const uint8_t* tpa = arp_ptr + 24;
 
 		// Construct Reply
-		std::vector<uint8_t> reply(42);
+		std::vector<uint8_t> reply(60);
 
 		// Ethernet Header
 		// Dest = SHA (Sender of request)
 		std::memcpy(reply.data(), sha, 6);
 		// Src = Our Dummy Gateway MAC (00:00:00:00:00:01)
-		uint8_t dummy_mac[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+		uint8_t dummy_mac[] = {0x0E, 0x13, 0x37, 0x30, 0xBE, 0xEF};
 		std::memcpy(reply.data() + 6, dummy_mac, 6);
 		// Type = ARP (0x0806)
 		reply[12] = 0x08; reply[13] = 0x06;
