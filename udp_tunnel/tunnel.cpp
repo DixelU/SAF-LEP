@@ -802,6 +802,14 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 	frame.insert(frame.end(), data.begin(), data.end());
 
 	std::cout << "[VPN] Tunnel -> TAP: IP packet size=" << data.size() << std::endl;
+	
+	// Hex dump the first 60 bytes of the IP packet for debugging
+	std::cout << "    Hex: ";
+	for (size_t i = 0; i < std::min((size_t)60, data.size()); ++i)
+	{
+		std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
+	}
+	std::cout << std::dec << std::endl;
 
 	if (!tap_adapter_->write(frame))
 	{
