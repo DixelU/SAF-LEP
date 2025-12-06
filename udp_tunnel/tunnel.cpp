@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <iostream>
 #include <cstring>
+#include <iomanip>
 
 namespace dixelu
 {
@@ -542,9 +543,45 @@ bool vpn_interface::start(const std::string& ip, const std::string& mask, const 
 		running_ = false;
 		return false;
 	}
+
+	// Store local IP for ARP filtering
+	try 
+	{
+		local_ip_ = boost::asio::ip::make_address_v4(ip);
+	} 
+	catch(...)
+	{
+		std::cerr << "Failed to parse local IP: " << ip << std::endl;
+	}
+
 #else
 	// Open TUN adapter
 	if (!tun_adapter_->open())
+// ... (rest of start unchanged) ...
+
+// ... (inside handle_arp) ...
+		// Sender IP (SPA)
+		const uint8_t* spa = arp_ptr + 14;
+		// Target IP (TPA)
+		const uint8_t* tpa = arp_ptr + 24;
+
+		std::cout << "[VPN] ARP Request: Who has " 
+				  << (int)tpa[0] << "." << (int)tpa[1] << "." << (int)tpa[2] << "." << (int)tpa[3] 
+				  << "? Tell " 
+				  << (int)spa[0] << "." << (int)spa[1] << "." << (int)spa[2] << "." << (int)spa[3] 
+				  << std::endl;
+
+		// Check if this is a DAD probe (Duplicate Address Detection) for our own IP
+		// If TPA matches our Local IP, we MUST NOT reply, otherwise Windows detects a conflict.
+		boost::asio::ip::address_v4 target_ip(std::array<unsigned char, 4>{tpa[0], tpa[1], tpa[2], tpa[3]});
+		if (target_ip == local_ip_)
+		{
+			std::cout << "[VPN] Ignoring DAD probe for our own IP." << std::endl;
+			return;
+		}
+
+		// It's a request for someone else (likely gateway). Let's reply.
+		// We act as the gateway (or whatever IP they are asking for).
 	{
 		std::cerr << "Failed to open TUN adapter" << std::endl;
 		running_ = false;
@@ -644,10 +681,6 @@ void vpn_interface::handle_arp(const std::vector<uint8_t>& packet)
 
 	if (htype == 1 && ptype == 0x0800 && oper == 1) // Ethernet, IPv4, Request
 	{
-		// It's a request. Let's reply.
-		// We act as the gateway (or whatever IP they are asking for).
-		// Since we are a tunnel, we can claim ANY IP that isn't the sender's.
-		
 		// Sender MAC (SHA)
 		const uint8_t* sha = arp_ptr + 8;
 		// Sender IP (SPA)
@@ -655,13 +688,33 @@ void vpn_interface::handle_arp(const std::vector<uint8_t>& packet)
 		// Target IP (TPA)
 		const uint8_t* tpa = arp_ptr + 24;
 
+		std::cout << "[VPN] ARP Request: Who has " 
+				  << (int)tpa[0] << "." << (int)tpa[1] << "." << (int)tpa[2] << "." << (int)tpa[3] 
+				  << "? Tell " 
+				  << (int)spa[0] << "." << (int)spa[1] << "." << (int)spa[2] << "." << (int)spa[3] 
+				  << std::endl;
+
+		// Check if this is a DAD probe (Duplicate Address Detection) for our own IP
+		// If TPA matches our Local IP, we MUST NOT reply, otherwise Windows detects a conflict.
+		boost::asio::ip::address_v4 target_ip(std::array<unsigned char, 4>{tpa[0], tpa[1], tpa[2], tpa[3]});
+		if (target_ip == local_ip_)
+		{
+			std::cout << "[VPN] Ignoring DAD probe for our own IP." << std::endl;
+			return;
+		}
+
+		// It's a request for someone else (likely gateway). Let's reply.
+		// We act as the gateway (or whatever IP they are asking for).
+
 		// Construct Reply
-		std::vector<uint8_t> reply(60);
+		// Ethernet min frame size is 60 bytes (excluding FCS). 
+		// ARP is 42 bytes. We must pad.
+		std::vector<uint8_t> reply(60, 0);
 
 		// Ethernet Header
 		// Dest = SHA (Sender of request)
 		std::memcpy(reply.data(), sha, 6);
-		// Src = Our Dummy Gateway MAC (00:00:00:00:00:01)
+		// Src = Our Dummy Gateway MAC
 		uint8_t dummy_mac[] = {0x0E, 0x13, 0x37, 0x30, 0xBE, 0xEF};
 		std::memcpy(reply.data() + 6, dummy_mac, 6);
 		// Type = ARP (0x0806)
@@ -687,8 +740,8 @@ void vpn_interface::handle_arp(const std::vector<uint8_t>& packet)
 		std::memcpy(r_ptr + 24, spa, 4);
 
 		// Send reply
-		// std::cout << "[VPN] Sending ARP Reply for " 
-		// 		  << (int)tpa[0] << "." << (int)tpa[1] << "." << (int)tpa[2] << "." << (int)tpa[3] << std::endl;
+		std::cout << "[VPN] Sending ARP Reply for " 
+				  << (int)tpa[0] << "." << (int)tpa[1] << "." << (int)tpa[2] << "." << (int)tpa[3] << std::endl;
 		tap_adapter_->write(reply);
 	}
 #endif

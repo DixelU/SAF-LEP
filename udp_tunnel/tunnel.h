@@ -151,6 +151,7 @@ private:
 	std::shared_ptr<p2p_tunnel> tunnel_;
 #ifdef _WIN32
 	std::unique_ptr<TapAdapter> tap_adapter_;
+	boost::asio::ip::address_v4 local_ip_;
 #else
 	std::unique_ptr<TunAdapter> tun_adapter_;
 #endif
