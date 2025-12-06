@@ -232,12 +232,19 @@ void p2p_tunnel::handle_send(const boost::system::error_code& error, std::size_t
 void p2p_tunnel::broadcast(const std::vector<uint8_t>& data)
 {
 	std::lock_guard<std::recursive_mutex> lock(peers_mutex_);
+	int sent_count = 0;
 	for (const auto& [key, peer] : peers_)
 	{
 		if (peer->is_connected)
 		{
 			send_to_peer_async(data, peer->endpoint);
+			sent_count++;
 		}
+	}
+	if (sent_count > 0) {
+		std::cout << "[Tunnel] Broadcasting " << data.size() << " bytes to " << sent_count << " peers" << std::endl;
+	} else {
+		std::cout << "[Tunnel] No connected peers to broadcast " << data.size() << " bytes" << std::endl;
 	}
 }
 
@@ -446,6 +453,7 @@ void vpn_interface::read_from_tap()
 #endif
 		if (!packet.empty())
 		{
+			std::cout << "[VPN] Read " << packet.size() << " bytes from TUN" << std::endl;
 			// Broadcast to all peers (simple hub mode)
 			tunnel_->broadcast(packet);
 		}
