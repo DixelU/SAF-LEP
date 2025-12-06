@@ -66,6 +66,7 @@ The server must allow IP forwarding and NAT for the VPN to provide internet acce
   ```bash
   route add <SERVER_PUBLIC_IP> mask 255.255.255.255 <YOUR_REAL_GATEWAY_IP> metric 1
   ```
+  - TODO: Add this into windows tap device initialiser /shrug 
 
 - Then start the client, pointing to the server's public IP and setting the gateway to the VPN server's virtual IP:
   ```bash
@@ -74,5 +75,5 @@ The server must allow IP forwarding and NAT for the VPN to provide internet acce
 
 - Verification
   Ping: ping 10.0.0.1 (from client)
-  Internet: curl google.com or traceroute google.com (should show hops through the VPN)
+  Internet: curl google.com or tracert google.com (should show hops through the VPN)
 

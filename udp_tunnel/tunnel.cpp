@@ -524,18 +524,21 @@ bool vpn_interface::start(const std::string& ip, const std::string& mask, const 
 		return false;
 	}
 
-	// Configure IP
-	if (!tap_adapter_->configure(ip, mask, gateway))
+	// Set status to connected (must be done before configuring routes so they bind correctly)
+	if (!tap_adapter_->set_status(true))
 	{
-		std::cerr << "Failed to configure TAP adapter IP" << std::endl;
+		std::cerr << "Failed to set TAP adapter status" << std::endl;
 		running_ = false;
 		return false;
 	}
 
-	// Set status to connected
-	if (!tap_adapter_->set_status(true))
+	// Give Windows a moment to recognize the link state
+	std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+	// Configure IP and Routes
+	if (!tap_adapter_->configure(ip, mask, gateway))
 	{
-		std::cerr << "Failed to set TAP adapter status" << std::endl;
+		std::cerr << "Failed to configure TAP adapter IP" << std::endl;
 		running_ = false;
 		return false;
 	}
