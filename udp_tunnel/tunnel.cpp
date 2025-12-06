@@ -2,6 +2,8 @@
 #include <chrono>
 #include <algorithm>
 #include <iostream>
+#include <iomanip>
+#include <cstdio>
 
 namespace dixelu
 {
@@ -453,7 +455,25 @@ void vpn_interface::read_from_tap()
 #endif
 		if (!packet.empty())
 		{
-			std::cout << "[VPN] Read " << packet.size() << " bytes from TUN" << std::endl;
+			std::cout << "[VPN] Read " << packet.size() << " bytes from TUN";
+			if (packet.size() >= 20)
+			{
+				// Simple hex dump of IP header
+				std::cout << " IP: ";
+				for (int i = 0; i < 20; ++i)
+				{
+					std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)packet[i] << " ";
+				}
+				std::cout << std::dec;
+				
+				// Extract src/dst
+				char src[16], dst[16];
+				sprintf(src, "%d.%d.%d.%d", packet[12], packet[13], packet[14], packet[15]);
+				sprintf(dst, "%d.%d.%d.%d", packet[16], packet[17], packet[18], packet[19]);
+				std::cout << " (" << src << " -> " << dst << ")";
+			}
+			std::cout << std::endl;
+
 			// Broadcast to all peers (simple hub mode)
 			tunnel_->broadcast(packet);
 		}
