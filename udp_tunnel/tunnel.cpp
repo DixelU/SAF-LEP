@@ -638,6 +638,7 @@ void vpn_interface::read_from_tap()
 				{
 					// Strip Ethernet header
 					std::vector<uint8_t> ip_packet(packet.begin() + 14, packet.end());
+					std::cout << "[VPN] TAP -> Tunnel: IP packet size=" << ip_packet.size() << std::endl;
 					tunnel_->broadcast(ip_packet);
 				}
 				else if (ether_type == 0x0806) // ARP
@@ -808,6 +809,8 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 
 	// Payload
 	frame.insert(frame.end(), data.begin(), data.end());
+
+	std::cout << "[VPN] Tunnel -> TAP: IP packet size=" << data.size() << std::endl;
 
 	if (!tap_adapter_->write(frame))
 	{
