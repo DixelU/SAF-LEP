@@ -233,11 +233,15 @@ void p2p_tunnel::handle_send(const boost::system::error_code& error, std::size_t
 void p2p_tunnel::broadcast(const std::vector<uint8_t>& data)
 {
 	std::lock_guard<std::recursive_mutex> lock(peers_mutex_);
+	int sent_count = 0;
+
 	for (const auto& [key, peer] : peers_)
 	{
 		if (peer->is_connected)
 		{
 			send_to_peer_async(data, peer->endpoint);
+			std::cout << "[Tunnel] Broadcasting " << data.size() << " bytes to " << peer->endpoint << std::endl;
+			sent_count++;
 		}
 	}
 }

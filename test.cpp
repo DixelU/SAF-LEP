@@ -14,9 +14,9 @@ void print_usage(const char* program_name)
 	std::cout << "Options:" << std::endl;
 	std::cout << "  -p, --port PORT               Local UDP port (default: 0 = auto)" << std::endl;
 	std::cout << "  -c, --connect HOST:PORT       Connect to peer" << std::endl;
-	std::cout << "  --ip IP	                      VPN IP address (e.g. 10.0.0.1)" << std::endl;
-	std::cout << "  --mask MASK                   VPN Subnet mask (default: 255.255.255.0)" << std::endl;
-	std::cout << "  --gw GATEWAY                  VPN Gateway (optional)" << std::endl;
+	std::cout << "      --ip IP                   VPN IP address (e.g. 10.0.0.1)" << std::endl;
+	std::cout << "      --mask MASK               VPN Subnet mask (default: 255.255.255.0)" << std::endl;
+	std::cout << "      --gw GATEWAY              VPN Gateway (optional)" << std::endl;
 	std::cout << "  -h, --help                    Show this help message" << std::endl;
 	std::cout << "\nExamples:" << std::endl;
 	std::cout << "  " << program_name << 
