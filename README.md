@@ -33,7 +33,7 @@ The server must allow IP forwarding and NAT for the VPN to provide internet acce
   sudo iptables -A FORWARD -i eth0 -o tun0 -m state --state RELATED,ESTABLISHED -j ACCEPT
   ```
 
-- MSS Clamping
+- Enable MSS Clamping
   ```bash
   sudo iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
   ```
