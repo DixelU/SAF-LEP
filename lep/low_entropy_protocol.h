@@ -113,11 +113,11 @@ constexpr std::vector<uint8_t> put_lep_v0(lep_v0_encoder_state &state, const uin
 	encoded_data.reserve(size * 3);
 
 	encoded_data[0] = 0b00110000;
-	//		    ^^  ^^^^
+	//			^^  ^^^^
 	//		version	 "hash"
 
 	encoded_data[1] = 0b00100001;
-	//		    ^
+	//			^
 	//		burst bit;	everything else is "payload type"; 33 ~ MP2T
 
 	encoded_data[2] = state.index >> 8;

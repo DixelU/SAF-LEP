@@ -9,11 +9,11 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(WIN32)
-    set(Boost_ROOT "D:/Progs/mingw64")
-    set(Boost_INCLUDE_DIR "D:/Progs/mingw64/include")
-    set(Boost_LIBRARY_DIR "D:/Progs/mingw64/lib")
-    set(Boost_USE_STATIC_LIBS ON)
-    set(Boost_DEBUG ON)
+	set(Boost_ROOT "D:/Progs/mingw64")
+	set(Boost_INCLUDE_DIR "D:/Progs/mingw64/include")
+	set(Boost_LIBRARY_DIR "D:/Progs/mingw64/lib")
+	set(Boost_USE_STATIC_LIBS ON)
+	set(Boost_DEBUG ON)
 endif()
 
 find_package(Boost REQUIRED COMPONENTS system)
@@ -24,9 +24,9 @@ set(SOURCES
 )
 
 if(WIN32)
-    list(APPEND SOURCES udp_tunnel/windows_tap.cpp)
+	list(APPEND SOURCES udp_tunnel/windows_tap.cpp)
 else()
-    list(APPEND SOURCES udp_tunnel/linux_tun.cpp)
+	list(APPEND SOURCES udp_tunnel/linux_tun.cpp)
 endif()
 
 add_executable(${PROJECT_NAME} ${SOURCES})
@@ -39,7 +39,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32 iphlpapi)
+	target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32 iphlpapi)
 else()
-    target_link_libraries(${PROJECT_NAME} PRIVATE pthread)
+	target_link_libraries(${PROJECT_NAME} PRIVATE pthread)
 endif()

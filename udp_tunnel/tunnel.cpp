@@ -2,8 +2,6 @@
 #include <chrono>
 #include <algorithm>
 #include <iostream>
-#include <iomanip>
-#include <cstdio>
 
 namespace dixelu
 {
@@ -234,19 +232,12 @@ void p2p_tunnel::handle_send(const boost::system::error_code& error, std::size_t
 void p2p_tunnel::broadcast(const std::vector<uint8_t>& data)
 {
 	std::lock_guard<std::recursive_mutex> lock(peers_mutex_);
-	int sent_count = 0;
 	for (const auto& [key, peer] : peers_)
 	{
 		if (peer->is_connected)
 		{
 			send_to_peer_async(data, peer->endpoint);
-			sent_count++;
 		}
-	}
-	if (sent_count > 0) {
-		std::cout << "[Tunnel] Broadcasting " << data.size() << " bytes to " << sent_count << " peers" << std::endl;
-	} else {
-		std::cout << "[Tunnel] No connected peers to broadcast " << data.size() << " bytes" << std::endl;
 	}
 }
 
@@ -455,32 +446,8 @@ void vpn_interface::read_from_tap()
 #endif
 		if (!packet.empty())
 		{
-			uint8_t version = packet[0] >> 4;
-			if (version == 4)
-			{
-				std::cout << "[VPN] Read " << packet.size() << " bytes from TUN";
-				if (packet.size() >= 20)
-				{
-					// Extract src/dst for IPv4
-					char src[16], dst[16];
-					sprintf(src, "%d.%d.%d.%d", packet[12], packet[13], packet[14], packet[15]);
-					sprintf(dst, "%d.%d.%d.%d", packet[16], packet[17], packet[18], packet[19]);
-					std::cout << " (IPv4: " << src << " -> " << dst << ")";
-				}
-				std::cout << std::endl;
-				
-				// Broadcast to all peers
-				tunnel_->broadcast(packet);
-			}
-			else if (version == 6)
-			{
-				// Ignore IPv6 for now to reduce log noise
-				// std::cout << "[VPN] Ignored IPv6 packet (" << packet.size() << " bytes)" << std::endl;
-			}
-			else
-			{
-				std::cout << "[VPN] Read unknown packet type " << (int)version << " (" << packet.size() << " bytes)" << std::endl;
-			}
+			// Broadcast to all peers (simple hub mode)
+			tunnel_->broadcast(packet);
 		}
 	}
 }

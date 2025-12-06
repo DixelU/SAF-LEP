@@ -12,15 +12,15 @@ void print_usage(const char* program_name)
 {
 	std::cout << "Usage: " << program_name << " [OPTIONS]" << std::endl;
 	std::cout << "Options:" << std::endl;
-	std::cout << "  -p, --port PORT          Local UDP port (default: 0 = auto)" << std::endl;
+	std::cout << "  -p, --port PORT		  Local UDP port (default: 0 = auto)" << std::endl;
 	std::cout << "  -c, --connect HOST:PORT  Connect to peer" << std::endl;
-	std::cout << "  --ip IP                  VPN IP address (e.g. 10.0.0.1)" << std::endl;
-	std::cout << "  --mask MASK              VPN Subnet mask (default: 255.255.255.0)" << std::endl;
-	std::cout << "  --gw GATEWAY             VPN Gateway (optional)" << std::endl;
-	std::cout << "  -h, --help               Show this help message" << std::endl;
+	std::cout << "  --ip IP				  VPN IP address (e.g. 10.0.0.1)" << std::endl;
+	std::cout << "  --mask MASK			  VPN Subnet mask (default: 255.255.255.0)" << std::endl;
+	std::cout << "  --gw GATEWAY			 VPN Gateway (optional)" << std::endl;
+	std::cout << "  -h, --help			   Show this help message" << std::endl;
 	std::cout << "\nExamples:" << std::endl;
-	std::cout << "  " << program_name << " -p 5000 --ip 10.0.0.1                    # Run as server/peer 1" << std::endl;
-	std::cout << "  " << program_name << " -c 127.0.0.1:5000 --ip 10.0.0.2          # Connect to peer 1" << std::endl;
+	std::cout << "  " << program_name << " -p 5000 --ip 10.0.0.1					# Run as server/peer 1" << std::endl;
+	std::cout << "  " << program_name << " -c 127.0.0.1:5000 --ip 10.0.0.2		  # Connect to peer 1" << std::endl;
 }
 
 int main(int argc, char* argv[])
