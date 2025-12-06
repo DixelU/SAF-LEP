@@ -7,10 +7,13 @@
 
 #ifdef _WIN32
 
-namespace dixelu {
-namespace udp {
+namespace dixelu
+{
+namespace udp
+{
 
-class TapAdapter {
+class TapAdapter 
+{
 public:
 	TapAdapter();
 	~TapAdapter();
@@ -33,15 +36,13 @@ public:
 	// Check if adapter is valid
 	bool is_valid() const;
 
-#ifdef _WIN32
-
 	// Get MAC address
 	std::vector<uint8_t> get_mac() const;
 
-#endif // _WIN32
-
 	// Set status to connected
 	bool set_status(bool connected);
+
+	uint32_t get_interface_index() const;
 
 private:
 	void* handle_;

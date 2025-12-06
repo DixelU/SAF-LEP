@@ -13,6 +13,7 @@
 #include <iphlpapi.h>
 
 #pragma comment(lib, "ws2_32")
+#pragma comment(lib, "Iphlpapi.lib")
 
 // TAP-Windows IOCTLs
 #define TAP_WIN_IOCTL(x) CTL_CODE(FILE_DEVICE_UNKNOWN, x, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -169,11 +170,23 @@ bool TapAdapter::configure(const std::string& ip_address, const std::string& net
 		system(del_cmd2.c_str());
 
 		// Add routes for 0.0.0.0/1 and 128.0.0.0/1 to override default route
-		// route add 0.0.0.0 mask 128.0.0.0 <GATEWAY> metric 1
-		// route add 128.0.0.0 mask 128.0.0.0 <GATEWAY> metric 1
+		// route add 0.0.0.0 mask 128.0.0.0 <GATEWAY> metric 1 IF <INDEX>
+		// route add 128.0.0.0 mask 128.0.0.0 <GATEWAY> metric 1 IF <INDEX>
 
-		std::string route_cmd1 = "route add 0.0.0.0 mask 128.0.0.0 " + gateway + " metric 1";
-		std::string route_cmd2 = "route add 128.0.0.0 mask 128.0.0.0 " + gateway + " metric 1";
+		uint32_t if_index = get_interface_index();
+		std::string if_str = "";
+		if (if_index != 0)
+		{
+			if_str = " IF " + std::to_string(if_index);
+			std::cout << "Using Interface Index: " << if_index << std::endl;
+		}
+		else
+		{
+			std::cerr << "Warning: Could not get Interface Index for " << adapter_name_ << std::endl;
+		}
+
+		std::string route_cmd1 = "route add 0.0.0.0 mask 128.0.0.0 " + gateway + " metric 1" + if_str;
+		std::string route_cmd2 = "route add 128.0.0.0 mask 128.0.0.0 " + gateway + " metric 1" + if_str;
 
 		std::cout << "Adding routes: " << std::endl;
 		std::cout << "  " << route_cmd1 << std::endl;
@@ -272,6 +285,46 @@ std::vector<uint8_t> TapAdapter::get_mac() const
 	}
 
 	return {};
+}
+
+uint32_t TapAdapter::get_interface_index() const
+{
+	ULONG out_buf_len = 15000;
+	PIP_ADAPTER_ADDRESSES p_addresses = (PIP_ADAPTER_ADDRESSES)malloc(out_buf_len);
+	if (p_addresses == NULL) return 0;
+
+	DWORD dw_ret_val = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_PREFIX, NULL, p_addresses, &out_buf_len);
+	if (dw_ret_val == ERROR_BUFFER_OVERFLOW)
+	{
+		free(p_addresses);
+		p_addresses = (PIP_ADAPTER_ADDRESSES)malloc(out_buf_len);
+		if (p_addresses == NULL) return 0;
+		dw_ret_val = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_PREFIX, NULL, p_addresses, &out_buf_len);
+	}
+
+	if (dw_ret_val == NO_ERROR)
+	{
+		PIP_ADAPTER_ADDRESSES p_curr_addresses = p_addresses;
+		while (p_curr_addresses)
+		{
+			// Convert FriendlyName (WCHAR) to String
+			std::wstring friendly_name_w = p_curr_addresses->FriendlyName;
+			std::string friendly_name(friendly_name_w.begin(), friendly_name_w.end()); // Simple conversion for ASCII names
+
+			if (friendly_name == adapter_name_)
+			{
+				uint32_t index = p_curr_addresses->IfIndex;
+				free(p_addresses);
+				return index;
+			}
+
+			p_curr_addresses = p_curr_addresses->Next;
+		}
+	}
+
+	if (p_addresses)
+		free(p_addresses);
+	return 0;
 }
 
 } // namespace udp
