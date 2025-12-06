@@ -603,7 +603,15 @@ void vpn_interface::read_from_tap()
 					std::vector<uint8_t> ip_packet(packet.begin() + 14, packet.end());
 					tunnel_->broadcast(ip_packet);
 				}
-				// Ignore other types (ARP, etc.) as we are simulating a point-to-point IP link
+				else if (ether_type == 0x0806) // ARP
+				{
+					handle_arp(packet);
+				}
+				else
+				{
+					// Log ignored packet types
+					std::cout << "[VPN] Ignored packet with EtherType: 0x" << std::hex << ether_type << std::dec << std::endl;
+				}
 			}
 		}
 #else
@@ -615,6 +623,75 @@ void vpn_interface::read_from_tap()
 		}
 #endif
 	}
+}
+
+void vpn_interface::handle_arp(const std::vector<uint8_t>& packet)
+{
+#ifdef _WIN32
+	// Packet includes Ethernet header (14 bytes) + ARP payload (28 bytes)
+	if (packet.size() < 42) return;
+
+	// Ethernet Header: [Dest(6)][Src(6)][Type(2)]
+	// ARP Packet:
+	// [HTYPE(2)][PTYPE(2)][HLEN(1)][PLEN(1)][OPER(2)]
+	// [SHA(6)][SPA(4)][THA(6)][TPA(4)]
+
+	const uint8_t* arp_ptr = packet.data() + 14;
+
+	uint16_t htype = (arp_ptr[0] << 8) | arp_ptr[1];
+	uint16_t ptype = (arp_ptr[2] << 8) | arp_ptr[3];
+	uint16_t oper = (arp_ptr[6] << 8) | arp_ptr[7];
+
+	if (htype == 1 && ptype == 0x0800 && oper == 1) // Ethernet, IPv4, Request
+	{
+		// It's a request. Let's reply.
+		// We act as the gateway (or whatever IP they are asking for).
+		// Since we are a tunnel, we can claim ANY IP that isn't the sender's.
+		
+		// Sender MAC (SHA)
+		const uint8_t* sha = arp_ptr + 8;
+		// Sender IP (SPA)
+		const uint8_t* spa = arp_ptr + 14;
+		// Target IP (TPA)
+		const uint8_t* tpa = arp_ptr + 24;
+
+		// Construct Reply
+		std::vector<uint8_t> reply(42);
+
+		// Ethernet Header
+		// Dest = SHA (Sender of request)
+		std::memcpy(reply.data(), sha, 6);
+		// Src = Our Dummy Gateway MAC (00:00:00:00:00:01)
+		uint8_t dummy_mac[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
+		std::memcpy(reply.data() + 6, dummy_mac, 6);
+		// Type = ARP (0x0806)
+		reply[12] = 0x08; reply[13] = 0x06;
+
+		// ARP Payload
+		uint8_t* r_ptr = reply.data() + 14;
+		
+		// HTYPE, PTYPE, HLEN, PLEN
+		std::memcpy(r_ptr, arp_ptr, 6); 
+		
+		// OPER = 2 (Reply)
+		r_ptr[6] = 0x00; r_ptr[7] = 0x02;
+
+		// SHA = Dummy MAC
+		std::memcpy(r_ptr + 8, dummy_mac, 6);
+		// SPA = TPA (Target IP of request becomes Sender IP of reply)
+		std::memcpy(r_ptr + 14, tpa, 4);
+		
+		// THA = SHA (Sender MAC of request)
+		std::memcpy(r_ptr + 18, sha, 6);
+		// TPA = SPA (Sender IP of request)
+		std::memcpy(r_ptr + 24, spa, 4);
+
+		// Send reply
+		// std::cout << "[VPN] Sending ARP Reply for " 
+		// 		  << (int)tpa[0] << "." << (int)tpa[1] << "." << (int)tpa[2] << "." << (int)tpa[3] << std::endl;
+		tap_adapter_->write(reply);
+	}
+#endif
 }
 
 void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& from)

@@ -159,6 +159,9 @@ private:
 
 	void read_from_tap();
 	void handle_tunnel_packet(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& from);
+
+	void handle_arp(const std::vector<uint8_t>& packet);
+
 };
 
 } // namespace udp
