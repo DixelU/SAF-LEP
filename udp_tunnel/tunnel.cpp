@@ -248,7 +248,7 @@ void p2p_tunnel::handle_fragmentation(dixelu::lep::packet& decoded)
 		uint8_t frag_index = decoded.data[4];
 		uint8_t total_frags = decoded.data[5];
 
-		// Payload starts at offset 4
+		// Payload starts at offset 6
 		size_t payload_size = decoded.data.size() - 6;
 
 		if (total_frags <= 1)
@@ -257,13 +257,13 @@ void p2p_tunnel::handle_fragmentation(dixelu::lep::packet& decoded)
 			if (!packet_callback_)
 				return;
 			
-			std::vector<uint8_t> payload(decoded.data.begin() + 4, decoded.data.end());
+			std::vector<uint8_t> payload(decoded.data.begin() + 6, decoded.data.end());
 			packet_callback_(payload, remote_endpoint_);
 		}
 		else
 		{
 			// Reassembly needed
-			std::lock_guard<std::mutex> lock(reassembly_mutex_);
+			std::lock_guard<std::mutex> locker(reassembly_mutex_);
 			std::string key = endpoint_to_string(remote_endpoint_) + ":" + std::to_string(packet_id);
 
 			auto& assembly = reassembly_buffer_[key];
@@ -363,7 +363,7 @@ void p2p_tunnel::connect_to_peer(const boost::asio::ip::udp::endpoint& endpoint)
 	// Create peer entry
 	auto& peer = get_or_create_peer(endpoint);
 	{
-		std::lock_guard<std::mutex> lock(peer.mutex);
+		std::lock_guard<std::mutex> locker(peer.mutex);
 		peer.is_connected = true;
 		peer.last_seen = std::chrono::steady_clock::now();
 	}
@@ -597,7 +597,8 @@ void vpn_interface::handle_arp(const std::vector<uint8_t>& packet)
 {
 #ifdef _WIN32
 	// Packet includes Ethernet header (14 bytes) + ARP payload (28 bytes)
-	if (packet.size() < 42) return;
+	if (packet.size() < 42)
+		return;
 
 	// Ethernet Header: [Dest(6)][Src(6)][Type(2)]
 	// ARP Packet:
