@@ -13,6 +13,7 @@
 #include <atomic>
 #include <vector>
 #include <array>
+#include <map>
 #include <string>
 #include <chrono>
 
@@ -36,14 +37,23 @@ class p2p_tunnel;
 using packet_received_callback = std::function<void(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& from)>;
 using connection_callback = std::function<void(const boost::asio::ip::udp::endpoint& peer)>;
 
+// packet data for long term storage
+struct packet_storage
+{
+	std::vector<uint8_t> data;
+	std::chrono::steady_clock::time_point tp;
+};
+
 // Connection state for a peer
 struct peer_connection
 {
 	boost::asio::ip::udp::endpoint endpoint;
 	uint32_t next_send_index = 0;
-	uint32_t expected_receive_index = 0;
+	uint32_t last_received_index = 0;
 	std::mutex mutex;
 	std::chrono::steady_clock::time_point last_seen = std::chrono::steady_clock::now();
+	std::map<uint32_t, packet_storage> storage;
+
 	bool is_connected = false;
 };
 
@@ -88,14 +98,24 @@ public:
 	// Check if peer is connected
 	bool is_peer_connected(const boost::asio::ip::udp::endpoint& peer) const;
 
+	static constexpr uint8_t PAC_RRQ = 19; // packet re-request
+	static constexpr uint8_t PAC_LTR = 37; // packet less-than (that index was) recieved
+	static constexpr uint8_t PAC_IWA = 45; // packet index wraparound (high index packet drop request)
+
 private:
 	void start_receive();
 	void handle_receive(const boost::system::error_code& error, std::size_t bytes_transferred);
 	void handle_send(const boost::system::error_code& error, std::size_t bytes_transferred,
 		std::shared_ptr<std::vector<uint8_t>> buffer, const boost::asio::ip::udp::endpoint& target);
 
-	void handle_fragmentation(dixelu::lep::packet& decoded);
-
+	void handle_fragmentation(peer_connection& peer, dixelu::lep::packet& decoded);
+	void handle_control_packet(peer_connection& peer, dixelu::lep::packet& decoded);
+	void send_control_packet(peer_connection& peer, uint8_t type, const std::vector<uint8_t>& extra_data = {});
+	
+	// Refactoring helpers
+	void process_packet_gap(peer_connection& peer, uint32_t packet_id);
+	void send_fragments(peer_connection& peer_conn, uint32_t packet_id, const std::vector<uint8_t>& data);
+	
 	peer_connection& get_or_create_peer(const boost::asio::ip::udp::endpoint& endpoint);
 	void update_peer_activity(const boost::asio::ip::udp::endpoint& endpoint);
 
