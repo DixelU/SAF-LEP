@@ -179,7 +179,9 @@ void p2p_tunnel::send_to_peer(const std::vector<uint8_t>& data, const boost::asi
 
 		// Prepare payload with header: [PacketID(2)][FragIndex(1)][TotalFrags(1)][Data...]
 		std::vector<uint8_t> payload;
-		payload.reserve(4 + chunk_size);
+		payload.reserve(6 + chunk_size);
+		payload.push_back((packet_id >> 24) & 0xFF);
+		payload.push_back((packet_id >> 16) & 0xFF);
 		payload.push_back((packet_id >> 8) & 0xFF);
 		payload.push_back(packet_id & 0xFF);
 		payload.push_back(static_cast<uint8_t>(i));
@@ -292,7 +294,7 @@ void p2p_tunnel::handle_send(const boost::system::error_code& error, std::size_t
 void p2p_tunnel::handle_fragmentation(dixelu::lep::packet& decoded)
 {
 	// Parse header: [PacketID(2)][FragIndex(1)][TotalFrags(1)]
-	if (decoded.data.size() < 4)
+	if (decoded.data.size() < 6)
 	{
 		// Treat as legacy/handshake if size 1 and 0x00?
 		// Handshake, pass through
@@ -781,12 +783,12 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 		std::cout << "[VPN] Tunnel -> TAP: IP packet size=" << data.size() << std::endl;
 
 		// Hex dump the first 60 bytes of the IP packet for debugging
-		std::cout << "    Hex: ";
+		/*std::cout << "    Hex: ";
 		for (size_t i = 0; i < std::min((size_t)60, data.size()); ++i)
 		{
 			std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)data[i] << " ";
 		}
-		std::cout << std::dec << std::endl;
+		std::cout << std::dec << std::endl;*/
 	}
 
 #ifdef _WIN32
