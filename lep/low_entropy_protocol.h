@@ -79,10 +79,10 @@ constexpr uint8_t embedded_test(uint8_t length)
 	constexpr static uint8_t ground_state = 'T';
 	for (uint16_t value = 0; value < (1 << length); value++)
 	{
-		const auto encoded_value = encode_lep(value, length, ground_state);
+		const auto encoded_value = encode_lep(static_cast<uint8_t>(value), length, ground_state);
 		const auto decoded_value = decode_lep(encoded_value, ground_state);
 		if (decoded_value.len != length || decoded_value.data != value)
-			return value;
+			return static_cast<uint8_t>(value);
 	}
 
 	return 1 << length;
@@ -253,6 +253,15 @@ constexpr std::vector<std::uint8_t> low_entropy_protocol<raw_lep_v0>::encode(
 {
 	details::v0::lep_v0_encoder_state encoder;
 	encoder.index = index;
+
+	if consteval
+	{
+		encoder.g_seed = index ^ static_cast<uint16_t>(size);
+	}
+	else
+	{
+		encoder.g_seed = static_cast<uint32_t>(reinterpret_cast<std::intptr_t>(data) ^ index);
+	}
 
 	return details::v0::put_lep_v0(encoder, data, size);
 }

@@ -95,6 +95,8 @@ private:
 	void handle_send(const boost::system::error_code& error, std::size_t bytes_transferred,
 		std::shared_ptr<std::vector<uint8_t>> buffer, const boost::asio::ip::udp::endpoint& target);
 
+	void handle_fragmentation(dixelu::lep::packet& decoded);
+
 	peer_connection& get_or_create_peer(const boost::asio::ip::udp::endpoint& endpoint);
 	void update_peer_activity(const boost::asio::ip::udp::endpoint& endpoint);
 
@@ -123,13 +125,13 @@ private:
 		size_t total_expected_bytes = 0;
 		uint8_t total_frags = 0;
 		uint8_t received_frags_count = 0;
-		std::vector<bool> received_frags_mask;
+		std::vector<uint8_t> received_frags_mask;
 		std::chrono::steady_clock::time_point first_frag_time;
 	};
 
 	std::mutex reassembly_mutex_;
 	std::unordered_map<std::string, fragment_assembly> reassembly_buffer_;
-	std::atomic<uint16_t> next_packet_id_{0};
+	std::atomic<uint32_t> next_packet_id_{0};
 
 	static constexpr size_t MAX_FRAGMENT_SIZE = 150;
 

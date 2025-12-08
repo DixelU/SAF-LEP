@@ -143,74 +143,7 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 
 		// Call packet callback
 		if (!decoded.data.empty())
-		{
-			// Parse header: [PacketID(2)][FragIndex(1)][TotalFrags(1)]
-			if (decoded.data.size() < 4)
-			{
-				// Treat as legacy/handshake if size 1 and 0x00?
-				if (decoded.data.size() == 1 && decoded.data[0] == 0x00)
-				{
-					// Handshake, pass through
-				}
-			}
-			else
-			{
-				uint16_t packet_id = (decoded.data[0] << 8) | decoded.data[1];
-				uint8_t frag_index = decoded.data[2];
-				uint8_t total_frags = decoded.data[3];
-				
-				// Payload starts at offset 4
-				size_t payload_size = decoded.data.size() - 4;
-
-				if (total_frags <= 1)
-				{
-					// Single fragment, pass directly
-					if (packet_callback_)
-					{
-						std::vector<uint8_t> payload(decoded.data.begin() + 4, decoded.data.end());
-						packet_callback_(payload, remote_endpoint_);
-					}
-				}
-				else
-				{
-					// Reassembly needed
-					std::lock_guard<std::mutex> lock(reassembly_mutex_);
-					std::string key = endpoint_to_string(remote_endpoint_) + ":" + std::to_string(packet_id);
-					
-					auto& assembly = reassembly_buffer_[key];
-					if (assembly.total_frags == 0)
-					{
-						// New assembly
-						assembly.total_frags = total_frags;
-						assembly.received_frags_mask.resize(total_frags, false);
-						assembly.first_frag_time = std::chrono::steady_clock::now();
-					}
-
-					if (frag_index < total_frags && !assembly.received_frags_mask[frag_index])
-					{
-						size_t offset = frag_index * MAX_FRAGMENT_SIZE;
-						if (assembly.data.size() < offset + payload_size)
-						{
-							assembly.data.resize(offset + payload_size);
-						}
-						
-						std::memcpy(assembly.data.data() + offset, decoded.data.data() + 4, payload_size);
-						assembly.received_frags_mask[frag_index] = true;
-						assembly.received_frags_count++;
-
-						if (assembly.received_frags_count == total_frags)
-						{
-							// Complete!
-							if (packet_callback_)
-							{
-								packet_callback_(assembly.data, remote_endpoint_);
-							}
-							reassembly_buffer_.erase(key);
-						}
-					}
-				}
-			}
-		}
+			handle_fragmentation(decoded);
 	}
 	catch (const std::exception& e)
 	{
@@ -297,7 +230,7 @@ void p2p_tunnel::send_to_peer_async(const std::vector<uint8_t>& data, const boos
 		return;
 	}
 
-	uint16_t packet_id = next_packet_id_++;
+	uint32_t packet_id = next_packet_id_++;
 	uint8_t total_frags_u8 = static_cast<uint8_t>(num_frags);
 
 	for (size_t i = 0; i < num_frags; ++i)
@@ -308,6 +241,8 @@ void p2p_tunnel::send_to_peer_async(const std::vector<uint8_t>& data, const boos
 		// Prepare payload with header: [PacketID(2)][FragIndex(1)][TotalFrags(1)][Data...]
 		std::vector<uint8_t> payload;
 		payload.reserve(4 + chunk_size);
+		payload.push_back((packet_id >> 24) & 0xFF);
+		payload.push_back((packet_id >> 16) & 0xFF);
 		payload.push_back((packet_id >> 8) & 0xFF);
 		payload.push_back(packet_id & 0xFF);
 		payload.push_back(static_cast<uint8_t>(i));
@@ -351,6 +286,73 @@ void p2p_tunnel::handle_send(const boost::system::error_code& error, std::size_t
 	if (error)
 	{
 		std::cerr << "Async send error to " << endpoint_to_string(target) << ": " << error.message() << std::endl;
+	}
+}
+
+void p2p_tunnel::handle_fragmentation(dixelu::lep::packet& decoded)
+{
+	// Parse header: [PacketID(2)][FragIndex(1)][TotalFrags(1)]
+	if (decoded.data.size() < 4)
+	{
+		// Treat as legacy/handshake if size 1 and 0x00?
+		// Handshake, pass through
+		if (decoded.data.size() == 1 && decoded.data[0] == 0x00)
+			return;
+
+		// todo: other quirks of tunnel communication
+	}
+	else
+	{
+		uint32_t packet_id = (decoded.data[0] << 24) | (decoded.data[1] << 16) | (decoded.data[2] << 8) | decoded.data[3];
+		uint8_t frag_index = decoded.data[4];
+		uint8_t total_frags = decoded.data[5];
+
+		// Payload starts at offset 4
+		size_t payload_size = decoded.data.size() - 6;
+
+		if (total_frags <= 1)
+		{
+			// Single fragment, pass directly
+			if (!packet_callback_)
+				return;
+			
+			std::vector<uint8_t> payload(decoded.data.begin() + 4, decoded.data.end());
+			packet_callback_(payload, remote_endpoint_);
+		}
+		else
+		{
+			// Reassembly needed
+			std::lock_guard<std::mutex> lock(reassembly_mutex_);
+			std::string key = endpoint_to_string(remote_endpoint_) + ":" + std::to_string(packet_id);
+
+			auto& assembly = reassembly_buffer_[key];
+			if (assembly.total_frags == 0)
+			{
+				// New assembly
+				assembly.total_frags = total_frags;
+				assembly.received_frags_mask.resize(total_frags, false);
+				assembly.first_frag_time = std::chrono::steady_clock::now();
+			}
+
+			if (frag_index < total_frags && !assembly.received_frags_mask[frag_index])
+			{
+				size_t offset = frag_index * MAX_FRAGMENT_SIZE;
+				if (assembly.data.size() < offset + payload_size)
+					assembly.data.resize(offset + payload_size);
+
+				std::memcpy(assembly.data.data() + offset, decoded.data.data() + 6, payload_size);
+				assembly.received_frags_mask[frag_index] = true;
+				assembly.received_frags_count++;
+
+				if (assembly.received_frags_count == total_frags)
+				{
+					// Complete!
+					if (packet_callback_)
+						packet_callback_(assembly.data, remote_endpoint_);
+					reassembly_buffer_.erase(key);
+				}
+			}
+		}
 	}
 }
 
