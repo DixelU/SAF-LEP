@@ -154,6 +154,22 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 	start_receive();
 }
 
+void p2p_tunnel::broadcast(const std::vector<uint8_t>& data)
+{
+	if (data.empty())
+		return;
+
+	// Copy the list of peers effectively to avoid holding the lock while sending?
+	// Actually send_to_peer_async is thread safe for global peers map access, 
+	// but we need a snapshot of connected peers.
+	auto connected_peers = get_connected_peers();
+	
+	for (const auto& peer : connected_peers)
+	{
+		send_to_peer_async(data, peer);
+	}
+}
+
 void p2p_tunnel::send_to_peer_async(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& peer)
 {
 	if (data.empty())
@@ -520,6 +536,7 @@ std::vector<boost::asio::ip::udp::endpoint> p2p_tunnel::get_connected_peers() co
 			result.push_back(peer->endpoint);
 		}
 	}
+
 	return result;
 }
 
