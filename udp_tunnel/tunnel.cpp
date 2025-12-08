@@ -154,69 +154,6 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 	start_receive();
 }
 
-void p2p_tunnel::send_to_peer(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& peer)
-{
-	if (data.empty())
-		return;
-
-	// Calculate fragments
-	size_t total_size = data.size();
-	size_t num_frags = (total_size + MAX_FRAGMENT_SIZE - 1) / MAX_FRAGMENT_SIZE;
-	
-	if (num_frags > 255)
-	{
-		std::cerr << "Packet too large to fragment (max 255 fragments)" << std::endl;
-		return;
-	}
-
-	uint16_t packet_id = next_packet_id_++;
-	uint8_t total_frags_u8 = static_cast<uint8_t>(num_frags);
-
-	for (size_t i = 0; i < num_frags; ++i)
-	{
-		size_t offset = i * MAX_FRAGMENT_SIZE;
-		size_t chunk_size = std::min(MAX_FRAGMENT_SIZE, total_size - offset);
-
-		// Prepare payload with header: [PacketID(2)][FragIndex(1)][TotalFrags(1)][Data...]
-		std::vector<uint8_t> payload;
-		payload.reserve(6 + chunk_size);
-		payload.push_back((packet_id >> 24) & 0xFF);
-		payload.push_back((packet_id >> 16) & 0xFF);
-		payload.push_back((packet_id >> 8) & 0xFF);
-		payload.push_back(packet_id & 0xFF);
-		payload.push_back(static_cast<uint8_t>(i));
-		payload.push_back(total_frags_u8);
-		payload.insert(payload.end(), data.begin() + offset, data.begin() + offset + chunk_size);
-
-		// Get or create peer connection
-		auto& peer_conn = get_or_create_peer(peer);
-
-		// Encode with LEP
-		uint16_t index;
-		{
-			std::lock_guard<std::mutex> lock(peer_conn.mutex);
-			index = peer_conn.next_send_index++;
-		}
-
-		auto encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::encode(
-			payload.data(), payload.size(), index);
-
-		if (encoded.empty())
-		{
-			std::cerr << "LEP encode failed" << std::endl;
-			continue;
-		}
-
-		// Send synchronously
-		boost::system::error_code ec;
-		socket_.send_to(boost::asio::buffer(encoded), peer, 0, ec);
-		if (ec)
-		{
-			std::cerr << "Send error: " << ec.message() << std::endl;
-		}
-	}
-}
-
 void p2p_tunnel::send_to_peer_async(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& peer)
 {
 	if (data.empty())
@@ -238,17 +175,19 @@ void p2p_tunnel::send_to_peer_async(const std::vector<uint8_t>& data, const boos
 	for (size_t i = 0; i < num_frags; ++i)
 	{
 		size_t offset = i * MAX_FRAGMENT_SIZE;
-		size_t chunk_size = std::min(MAX_FRAGMENT_SIZE, total_size - offset);
+		size_t chunk_size = (std::min)(MAX_FRAGMENT_SIZE, total_size - offset);
 
-		// Prepare payload with header: [PacketID(2)][FragIndex(1)][TotalFrags(1)][Data...]
+		// Prepare payload with header: [PacketID(4)][FragIndex(1)][TotalFrags(1)][Data...]
 		std::vector<uint8_t> payload;
-		payload.reserve(4 + chunk_size);
+
+		payload.reserve(6 + chunk_size);
 		payload.push_back((packet_id >> 24) & 0xFF);
 		payload.push_back((packet_id >> 16) & 0xFF);
 		payload.push_back((packet_id >> 8) & 0xFF);
 		payload.push_back(packet_id & 0xFF);
 		payload.push_back(static_cast<uint8_t>(i));
 		payload.push_back(total_frags_u8);
+
 		payload.insert(payload.end(), data.begin() + offset, data.begin() + offset + chunk_size);
 
 		// Get or create peer connection

@@ -40,8 +40,8 @@ using connection_callback = std::function<void(const boost::asio::ip::udp::endpo
 struct peer_connection
 {
 	boost::asio::ip::udp::endpoint endpoint;
-	uint16_t next_send_index = 0;
-	uint16_t expected_receive_index = 0;
+	uint32_t next_send_index = 0;
+	uint32_t expected_receive_index = 0;
 	std::mutex mutex;
 	std::chrono::steady_clock::time_point last_seen = std::chrono::steady_clock::now();
 	bool is_connected = false;
@@ -66,7 +66,6 @@ public:
 	void run_in_thread();
 
 	// Send data to a specific peer (with LEP encoding)
-	void send_to_peer(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& peer);
 	void send_to_peer_async(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& peer);
 
 	// Broadcast to all connected peers
