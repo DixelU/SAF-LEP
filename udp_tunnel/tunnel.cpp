@@ -393,7 +393,7 @@ void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
 		std::lock_guard<std::mutex> locker(reassembly_mutex_);
 
 		auto packets = reassembly_in_progress_ | std::views::take(10) | std::ranges::to<std::vector>();
-		auto late_packets_view = late_reassemly_ | std::views::take(10);
+		auto late_packets_view = late_reassembly_ | std::views::take(10);
 		if (!late_packets_view.empty())
 			packets.insert_range(packets.end(), late_packets_view);
 		// Gather candidates: top 10 from progress + top 10 from late
