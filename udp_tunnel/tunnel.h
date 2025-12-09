@@ -14,6 +14,7 @@
 #include <vector>
 #include <array>
 #include <map>
+#include <set>
 #include <string>
 #include <chrono>
 
@@ -150,7 +151,10 @@ private:
 
 	std::mutex reassembly_mutex_;
 	std::unordered_map<std::string, fragment_assembly> reassembly_buffer_;
+	std::set<uint32_t> reassembly_in_progress_;
+	std::set<uint32_t> late_reassemly_;
 	std::atomic<uint32_t> next_packet_id_{0};
+	uint32_t reassembly_timeout_{10};
 
 	static constexpr size_t MAX_FRAGMENT_SIZE = 150;
 

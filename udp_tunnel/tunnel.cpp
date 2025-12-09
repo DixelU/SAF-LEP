@@ -5,6 +5,8 @@
 #include <iostream>
 #include <cstring>
 #include <iomanip>
+#include <numeric>
+#include <ranges>
 
 #include "global_flags.h"
 
@@ -163,11 +165,8 @@ void p2p_tunnel::broadcast(const std::vector<uint8_t>& data)
 	// Actually send_to_peer_async is thread safe for global peers map access, 
 	// but we need a snapshot of connected peers.
 	auto connected_peers = get_connected_peers();
-	
 	for (const auto& peer : connected_peers)
-	{
 		send_to_peer_async(data, peer);
-	}
 }
 
 void p2p_tunnel::send_to_peer_async(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& peer)
@@ -201,9 +200,7 @@ void p2p_tunnel::handle_send(const boost::system::error_code& error, std::size_t
 	std::shared_ptr<std::vector<uint8_t>> buffer, const boost::asio::ip::udp::endpoint& target)
 {
 	if (error)
-	{
 		std::cerr << "Async send error to " << endpoint_to_string(target) << ": " << error.message() << std::endl;
-	}
 }
 
 static uint32_t get_u32(const std::vector<uint8_t>& value, size_t index)
@@ -266,6 +263,9 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 				assembly.first_frag_time = std::chrono::steady_clock::now();
 			}
 
+			if (total_frags > 1 && std::reduce(assembly.received_frags_mask.begin(), assembly.received_frags_mask.end()) == 0)
+				reassembly_in_progress_.insert(packet_id);
+
 			if (frag_index < total_frags && !assembly.received_frags_mask[frag_index])
 			{
 				size_t offset = frag_index * MAX_FRAGMENT_SIZE;
@@ -282,6 +282,9 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 					if (packet_callback_)
 						packet_callback_(assembly.data, remote_endpoint_);
 					reassembly_buffer_.erase(key);
+
+					reassembly_in_progress_.erase(packet_id);
+					late_reassemly_.erase(packet_id);
 				}
 			}
 		}
@@ -296,35 +299,57 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 	{
 		case PAC_RRQ:
 		{
-			if (decoded.data.size() >= 5)
-			{
-				uint32_t req_id = get_u32(decoded.data, 1);
-				if (VERBOSE_MODE)
-					std::cout << "[Tunnel] Received RRQ for packet " << req_id << std::endl;
-				
-				std::lock_guard<std::mutex> lock(peer.mutex);
-				auto it = peer.storage.find(req_id);
-				if (it != peer.storage.end())
-				{
-					// Resend
-					auto buffer = std::make_shared<std::vector<uint8_t>>(it->second.data);
-					socket_.async_send_to(
-						boost::asio::buffer(*buffer),
-						peer.endpoint,
-						[this, buffer, endpoint = peer.endpoint](const boost::system::error_code& error, std::size_t bytes_transferred) {
-							handle_send(error, bytes_transferred, buffer, endpoint);
-						});
-				}
-			}
+			if (decoded.data.size() != 5)
+				return;
+
+			uint32_t req_id = get_u32(decoded.data, 1);
+			if (VERBOSE_MODE)
+				std::cout << "[Tunnel] Received RRQ for packet " << req_id << std::endl;
+			
+			std::lock_guard<std::mutex> lock(peer.mutex);
+			auto it = peer.storage.find(req_id);
+			if (it == peer.storage.end())
+				return;
+
+			// Resend
+			auto buffer = std::make_shared<std::vector<uint8_t>>(it->second.data);
+			socket_.async_send_to(
+				boost::asio::buffer(*buffer),
+				peer.endpoint,
+					[this, buffer, endpoint = peer.endpoint](const boost::system::error_code& error, std::size_t bytes_transferred) {
+						handle_send(error, bytes_transferred, buffer, endpoint);
+					});
+			
 			break;
 		}
 		case PAC_IWA:
 		{
 			if (VERBOSE_MODE)
 				std::cout << "[Tunnel] Received IWA (Index Wrap Around)" << std::endl;
+
 			std::lock_guard<std::mutex> lock(peer.mutex);
 			peer.last_received_index = 0; // Reset expectation
+
+			if (!late_reassemly_.empty())
+				std::cout << "[Tunnel] Late reassembly container is not empty upon wraparound!" << std::endl;
+
+			late_reassemly_ = std::move(reassembly_in_progress_);
+
 			break;
+		}
+		case PAC_LTR:
+		{
+			if (decoded.data.size() != 5)
+				return;
+
+			std::lock_guard<std::mutex> lock(peer.mutex);
+
+			uint32_t req_id = get_u32(decoded.data, 1);
+			auto iter = peer.storage.upper_bound(req_id);
+			if (iter == peer.storage.end())
+				return;
+
+			peer.storage.erase(peer.storage.begin(), iter);
 		}
 	}
 }
@@ -361,27 +386,47 @@ void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const 
 
 void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
 {
-	if (peer.last_received_index != 0 || packet_id > 0)
+	std::set<uint32_t> late_packets;
+	auto curr_time = std::chrono::steady_clock::now();
+
 	{
-		if (packet_id > peer.last_received_index + 1)
+		std::lock_guard<std::mutex> locker(reassembly_mutex_);
+
+		auto packets = reassembly_in_progress_ | std::views::take(10) | std::ranges::to<std::vector>();
+		auto late_packets_view = late_reassemly_ | std::views::take(10);
+		if (!late_packets_view.empty())
+			packets.insert_range(packets.end(), late_packets_view);
+
+		for (auto& paclet_id: packets)
 		{
-			uint32_t diff = packet_id - peer.last_received_index;
-			if (diff < 500)
+			std::string key = endpoint_to_string(remote_endpoint_) + ":" + std::to_string(packet_id);
+			
+			auto iter = reassembly_buffer_.find(key);
+			if (iter == reassembly_buffer_.end()) [[unlikely]]
 			{
-				for (uint32_t id = peer.last_received_index + 1; id < packet_id; ++id)
-				{
-					std::vector<uint8_t> req_data;
-					req_data.push_back((id >> 24) & 0xFF);
-					req_data.push_back((id >> 16) & 0xFF);
-					req_data.push_back((id >> 8) & 0xFF);
-					req_data.push_back(id & 0xFF);
-					send_control_packet(peer, PAC_RRQ, req_data);
-					
-					if (VERBOSE_MODE)
-						std::cout << "[Tunnel] Detected gap, requesting ID: " << id << std::endl;
-				}
+				std::cerr << "REASSEMBLY DESYNC\n";
+				reassembly_in_progress_.erase(packet_id);
+				continue;
 			}
+
+			auto seconds = std::chrono::duration_cast<std::chrono::seconds>(curr_time - iter->second.first_frag_time).count();
+			if (seconds < reassembly_timeout_)
+				continue;
 		}
+
+	}
+	
+	for (auto& id : late_packets)
+	{
+		std::vector<uint8_t> req_data;
+		req_data.push_back((id >> 24) & 0xFF);
+		req_data.push_back((id >> 16) & 0xFF);
+		req_data.push_back((id >> 8) & 0xFF);
+		req_data.push_back(id & 0xFF);
+		send_control_packet(peer, PAC_RRQ, req_data);
+
+		if (VERBOSE_MODE)
+			std::cout << "[Tunnel] Detected gap, requesting ID: " << id << std::endl;
 	}
 }
 
@@ -424,7 +469,7 @@ void p2p_tunnel::send_fragments(peer_connection& peer_conn, uint32_t packet_id, 
 			std::lock_guard<std::mutex> lock(peer_conn.mutex);
 			peer_conn.storage[packet_id] = { encoded, std::chrono::steady_clock::now() };
 			
-			if (peer_conn.storage.size() > 2000)
+			if (peer_conn.storage.size() > 4000)
 			{
 				peer_conn.storage.erase(peer_conn.storage.begin());
 			}
