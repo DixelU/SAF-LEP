@@ -284,7 +284,7 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 					reassembly_buffer_.erase(key);
 
 					reassembly_in_progress_.erase(packet_id);
-					late_reassemly_.erase(packet_id);
+					late_reassembly_.erase(packet_id);
 				}
 			}
 		}
@@ -330,10 +330,10 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 			std::lock_guard<std::mutex> lock(peer.mutex);
 			peer.last_received_index = 0; // Reset expectation
 
-			if (!late_reassemly_.empty())
+			if (!late_reassembly_.empty())
 				std::cout << "[Tunnel] Late reassembly container is not empty upon wraparound!" << std::endl;
 
-			late_reassemly_ = std::move(reassembly_in_progress_);
+			late_reassembly_ = std::move(reassembly_in_progress_);
 
 			break;
 		}
@@ -396,8 +396,9 @@ void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
 		auto late_packets_view = late_reassemly_ | std::views::take(10);
 		if (!late_packets_view.empty())
 			packets.insert_range(packets.end(), late_packets_view);
+		// Gather candidates: top 10 from progress + top 10 from late
 
-		for (auto& paclet_id: packets)
+		for (auto& packet_id: packets)
 		{
 			std::string key = endpoint_to_string(remote_endpoint_) + ":" + std::to_string(packet_id);
 			
@@ -410,10 +411,9 @@ void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
 			}
 
 			auto seconds = std::chrono::duration_cast<std::chrono::seconds>(curr_time - iter->second.first_frag_time).count();
-			if (seconds < reassembly_timeout_)
-				continue;
+			if (seconds >= reassembly_timeout_)
+				late_packets.insert(packet_id);
 		}
-
 	}
 	
 	for (auto& id : late_packets)

@@ -152,7 +152,7 @@ private:
 	std::mutex reassembly_mutex_;
 	std::unordered_map<std::string, fragment_assembly> reassembly_buffer_;
 	std::set<uint32_t> reassembly_in_progress_;
-	std::set<uint32_t> late_reassemly_;
+	std::set<uint32_t> late_reassembly_;
 	std::atomic<uint32_t> next_packet_id_{0};
 	uint32_t reassembly_timeout_{10};
 
