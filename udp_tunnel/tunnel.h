@@ -45,6 +45,17 @@ struct packet_storage
 	std::chrono::steady_clock::time_point tp;
 };
 
+struct fragment_assembly
+{
+	std::vector<uint8_t> data;
+	size_t received_bytes = 0;
+	size_t total_expected_bytes = 0;
+	uint8_t total_frags = 0;
+	uint8_t received_frags_count = 0;
+	std::vector<uint8_t> received_frags_mask;
+	std::chrono::steady_clock::time_point first_frag_time;
+};
+
 // Connection state for a peer
 struct peer_connection
 {
@@ -54,6 +65,11 @@ struct peer_connection
 	std::mutex mutex;
 	std::chrono::steady_clock::time_point last_seen = std::chrono::steady_clock::now();
 	std::map<uint32_t, packet_storage> storage;
+
+	// Reassembly state (per peer)
+	std::unordered_map<uint32_t, fragment_assembly> reassembly_buffer;
+	std::set<uint32_t> reassembly_in_progress;
+	std::set<uint32_t> late_reassembly;
 
 	bool is_connected = false;
 };
@@ -137,22 +153,6 @@ private:
 	std::atomic<bool> running_{false};
 	std::thread io_thread_;
 
-	// Fragmentation support
-	struct fragment_assembly
-	{
-		std::vector<uint8_t> data;
-		size_t received_bytes = 0;
-		size_t total_expected_bytes = 0;
-		uint8_t total_frags = 0;
-		uint8_t received_frags_count = 0;
-		std::vector<uint8_t> received_frags_mask;
-		std::chrono::steady_clock::time_point first_frag_time;
-	};
-
-	std::mutex reassembly_mutex_;
-	std::unordered_map<std::string, fragment_assembly> reassembly_buffer_;
-	std::set<uint32_t> reassembly_in_progress_;
-	std::set<uint32_t> late_reassembly_;
 	std::atomic<uint32_t> next_packet_id_{0};
 	uint32_t reassembly_timeout_{10};
 

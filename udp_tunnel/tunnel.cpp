@@ -227,66 +227,69 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 		uint8_t frag_index = decoded.data[4];
 		uint8_t total_frags = decoded.data[5];
 
-		// Gap detection
+		// Payload starts at offset 6
+		size_t payload_size = decoded.data.size() - 6;
+		std::vector<uint8_t> completed_packet;
+
 		{
 			std::lock_guard<std::mutex> lock(peer.mutex);
+
+			// Gap detection
 			process_packet_gap(peer, packet_id);
 			
 			if (packet_id > peer.last_received_index)
 				peer.last_received_index = packet_id;
-		}
 
-		// Payload starts at offset 6
-		size_t payload_size = decoded.data.size() - 6;
-
-		if (total_frags <= 1)
-		{
-			// Single fragment, pass directly
-			if (!packet_callback_)
-				return;
-			
-			std::vector<uint8_t> payload(decoded.data.begin() + 6, decoded.data.end());
-			packet_callback_(payload, remote_endpoint_);
-		}
-		else
-		{
-			// Reassembly needed
-			std::lock_guard<std::mutex> locker(reassembly_mutex_);
-			std::string key = endpoint_to_string(remote_endpoint_) + ":" + std::to_string(packet_id);
-
-			auto& assembly = reassembly_buffer_[key];
-			if (assembly.total_frags == 0)
+			if (total_frags <= 1)
 			{
-				// New assembly
-				assembly.total_frags = total_frags;
-				assembly.received_frags_mask.resize(total_frags, false);
-				assembly.first_frag_time = std::chrono::steady_clock::now();
+				// Single fragment, pass directly
+				// We need to copy payload because we are under lock and callback might take time/lock
+				completed_packet.assign(decoded.data.begin() + 6, decoded.data.end());
 			}
-
-			if (total_frags > 1 && std::reduce(assembly.received_frags_mask.begin(), assembly.received_frags_mask.end()) == 0)
-				reassembly_in_progress_.insert(packet_id);
-
-			if (frag_index < total_frags && !assembly.received_frags_mask[frag_index])
+			else
 			{
-				size_t offset = frag_index * MAX_FRAGMENT_SIZE;
-				if (assembly.data.size() < offset + payload_size)
-					assembly.data.resize(offset + payload_size);
-
-				std::memcpy(assembly.data.data() + offset, decoded.data.data() + 6, payload_size);
-				assembly.received_frags_mask[frag_index] = true;
-				assembly.received_frags_count++;
-
-				if (assembly.received_frags_count == total_frags)
+				// Reassembly needed
+				// Use packet_id directly as key (per-peer buffer)
+				auto& assembly = peer.reassembly_buffer[packet_id];
+				
+				if (assembly.total_frags == 0)
 				{
-					// Complete!
-					if (packet_callback_)
-						packet_callback_(assembly.data, remote_endpoint_);
-					reassembly_buffer_.erase(key);
+					// New assembly
+					assembly.total_frags = total_frags;
+					assembly.received_frags_mask.resize(total_frags, 0); // 0 = false
+					assembly.first_frag_time = std::chrono::steady_clock::now();
+				}
 
-					reassembly_in_progress_.erase(packet_id);
-					late_reassembly_.erase(packet_id);
+				if (total_frags > 1 && std::reduce(assembly.received_frags_mask.begin(), assembly.received_frags_mask.end()) == 0)
+					peer.reassembly_in_progress.insert(packet_id);
+
+				if (frag_index < total_frags && !assembly.received_frags_mask[frag_index])
+				{
+					size_t offset = frag_index * MAX_FRAGMENT_SIZE;
+					if (assembly.data.size() < offset + payload_size)
+						assembly.data.resize(offset + payload_size);
+
+					std::memcpy(assembly.data.data() + offset, decoded.data.data() + 6, payload_size);
+					assembly.received_frags_mask[frag_index] = 1; // 1 = true
+					assembly.received_frags_count++;
+
+					if (assembly.received_frags_count == total_frags)
+					{
+						// Complete!
+						completed_packet = std::move(assembly.data);
+						
+						peer.reassembly_buffer.erase(packet_id);
+						peer.reassembly_in_progress.erase(packet_id);
+						peer.late_reassembly.erase(packet_id);
+					}
 				}
 			}
+		} // Unlock peer.mutex
+
+		// Call callback outside lock
+		if (!completed_packet.empty() && packet_callback_)
+		{
+			packet_callback_(completed_packet, remote_endpoint_);
 		}
 	}
 }
@@ -330,10 +333,10 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 			std::lock_guard<std::mutex> lock(peer.mutex);
 			peer.last_received_index = 0; // Reset expectation
 
-			if (!late_reassembly_.empty())
+			if (!peer.late_reassembly.empty())
 				std::cout << "[Tunnel] Late reassembly container is not empty upon wraparound!" << std::endl;
 
-			late_reassembly_ = std::move(reassembly_in_progress_);
+			peer.late_reassembly = std::move(peer.reassembly_in_progress);
 
 			break;
 		}
@@ -386,33 +389,34 @@ void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const 
 
 void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
 {
+	// NOTE: This function is called with peer.mutex ALREADY LOCKED
+	
 	std::set<uint32_t> late_packets;
 	auto curr_time = std::chrono::steady_clock::now();
 
 	{
-		std::lock_guard<std::mutex> locker(reassembly_mutex_);
-
-		auto packets = reassembly_in_progress_ | std::views::take(10) | std::ranges::to<std::vector>();
-		auto late_packets_view = late_reassembly_ | std::views::take(10);
+		// No need for reassembly_mutex_ anymore, everything is in peer
+		
+		auto packets = peer.reassembly_in_progress | std::views::take(10) | std::ranges::to<std::vector>();
+		auto late_packets_view = peer.late_reassembly | std::views::take(10);
 		for (auto& el : late_packets_view)
 			packets.push_back(el);
 		// Gather candidates: top 10 from progress + top 10 from late
 
-		for (auto& packet_id: packets)
+		for (auto& pid: packets)
 		{
-			std::string key = endpoint_to_string(remote_endpoint_) + ":" + std::to_string(packet_id);
-			
-			auto iter = reassembly_buffer_.find(key);
-			if (iter == reassembly_buffer_.end()) [[unlikely]]
+			auto iter = peer.reassembly_buffer.find(pid);
+			if (iter == peer.reassembly_buffer.end()) [[unlikely]]
 			{
-				std::cerr << "REASSEMBLY DESYNC\n";
-				reassembly_in_progress_.erase(packet_id);
+				std::cerr << "REASSEMBLY DESYNC for ID " << pid << "\n";
+				peer.reassembly_in_progress.erase(pid);
+				peer.late_reassembly.erase(pid);
 				continue;
 			}
 
 			auto seconds = std::chrono::duration_cast<std::chrono::seconds>(curr_time - iter->second.first_frag_time).count();
 			if (seconds >= reassembly_timeout_)
-				late_packets.insert(packet_id);
+				late_packets.insert(pid);
 		}
 	}
 	
