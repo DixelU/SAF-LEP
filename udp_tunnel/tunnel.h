@@ -54,6 +54,7 @@ struct fragment_assembly
 	uint8_t received_frags_count = 0;
 	std::vector<uint8_t> received_frags_mask;
 	std::chrono::steady_clock::time_point first_frag_time;
+	std::chrono::steady_clock::time_point last_request_time;
 };
 
 // Connection state for a peer

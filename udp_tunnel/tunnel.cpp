@@ -258,6 +258,7 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 					assembly.total_frags = total_frags;
 					assembly.received_frags_mask.resize(total_frags, 0); // 0 = false
 					assembly.first_frag_time = std::chrono::steady_clock::now();
+					assembly.last_request_time = assembly.first_frag_time;
 				}
 
 				if (total_frags > 1 && std::reduce(assembly.received_frags_mask.begin(), assembly.received_frags_mask.end()) == 0)
@@ -415,9 +416,18 @@ void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
 				continue;
 			}
 
-			auto seconds = std::chrono::duration_cast<std::chrono::seconds>(curr_time - iter->second.first_frag_time).count();
-			if (seconds >= reassembly_timeout_)
-				late_packets.insert(pid);
+			auto time_since_start = std::chrono::duration_cast<std::chrono::seconds>(curr_time - iter->second.first_frag_time).count();
+			auto time_since_last_req = std::chrono::duration_cast<std::chrono::seconds>(curr_time - iter->second.last_request_time).count();
+			
+			// If it's been long enough since start, AND long enough since last request
+			if (time_since_start >= reassembly_timeout_)
+			{
+				if (time_since_last_req >= 2) // Retry every 2 seconds
+				{
+					late_packets.insert(pid);
+					iter->second.last_request_time = curr_time; // Update last request time
+				}
+			}
 		}
 	}
 	
