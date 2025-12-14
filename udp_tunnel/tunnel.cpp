@@ -367,7 +367,8 @@ void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const 
 	// Encode with next index
 	uint16_t index;
 	{
-		std::lock_guard<std::mutex> lock(peer.mutex);
+		// Assumes peer.mutex is ALREADY LOCKED by the caller
+		// std::lock_guard<std::mutex> lock(peer.mutex);
 		// Control packets consume an index sequence to keep LEP encryption synchronized
 		index = peer.next_send_index++;
 	}
