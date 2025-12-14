@@ -1,4 +1,4 @@
-# SAF-LEP (Secure AF - Low Entropy Protocol)
+# SAF-LEP (Simple/Secure AF - Low Entropy Protocol)
 
 SAF-LEP is a Proof-of-Concept VPN tunneling tool designed to evade Deep Packet Inspection (DPI) by masquerading encrypted traffic as high-entropy "noise" or potentially mimicking unencrypted media streams (future work).
 
