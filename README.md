@@ -13,6 +13,21 @@ The core idea is **Low Entropy Protocol (LEP)**: instead of sending a solid bloc
     - **Low Entropy Encoding**: Payload is encoded to reduce statistical randomness.
     - **Jitter/Padding**: (Planned) Traffic shaping to hide packet timing signatures.
 
+--- 
+
+## Near future plans
+
+- **Android VPN Client** (Server mode would come later)
+    - High priority !!!
+- Fully automatic setup ( just address and mode flag, nothing more 😅)
+    - Might be implemented along with Android client
+- Containerized version (Docker)
+- More encoding "modes" (currently only `raw_lep_v0` is implemented - partially VoIP/MPEG1 like headers with near-constant value fields)
+    - `html`
+    - `raw_text`
+    - `rtsp`
+    - ... whatever 💁
+
 ---
 
 ## Build Instructions
