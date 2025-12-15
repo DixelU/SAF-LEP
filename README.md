@@ -35,6 +35,9 @@ make
 2. Ensure `Boost_ROOT` is set if not in standard paths.
 3. Build the `SAF-LEP.exe` target.
 
+#### *OR*
+Open SAF-LEP-ExPuN solution file in Visual Studio. It requires static boost libraries to be installed through vcpkg globally.
+
 ---
 
 ## Usage Instructions 
