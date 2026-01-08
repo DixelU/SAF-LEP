@@ -130,6 +130,8 @@ private:
 	void handle_fragmentation(peer_connection& peer, dixelu::lep::packet& decoded);
 	void handle_control_packet(peer_connection& peer, dixelu::lep::packet& decoded);
 	void send_control_packet(peer_connection& peer, uint8_t type, const std::vector<uint8_t>& extra_data = {});
+
+	void internal_cleanup_procedure(peer_connection& peer);
 	
 	// Refactoring helpers
 	void process_packet_gap(peer_connection& peer, uint32_t packet_id);

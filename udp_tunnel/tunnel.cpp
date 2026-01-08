@@ -146,6 +146,8 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 		// Call packet callback
 		if (!decoded.data.empty())
 			handle_fragmentation(peer, decoded);
+
+		internal_cleanup_procedure(peer);
 	}
 	catch (const std::exception& e)
 	{
@@ -261,7 +263,12 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 					assembly.last_request_time = assembly.first_frag_time;
 				}
 
-				if (total_frags > 1 && std::reduce(assembly.received_frags_mask.begin(), assembly.received_frags_mask.end()) == 0)
+				uint32_t current_frags = std::reduce(assembly.received_frags_mask.begin(), assembly.received_frags_mask.end());
+
+				if (current_frags == total_frags)
+					return;
+
+				if (current_frags == 0)
 					peer.reassembly_in_progress.insert(packet_id);
 
 				if (frag_index < total_frags && !assembly.received_frags_mask[frag_index])
@@ -278,8 +285,10 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 					{
 						// Complete!
 						completed_packet = std::move(assembly.data);
-						
-						peer.reassembly_buffer.erase(packet_id);
+
+						// RRQ will most likely trigger recreation of this buffer
+						//peer.reassembly_buffer.erase(packet_id); 
+
 						peer.reassembly_in_progress.erase(packet_id);
 						peer.late_reassembly.erase(packet_id);
 					}
@@ -413,6 +422,34 @@ void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const 
 	}
 }
 
+void p2p_tunnel::internal_cleanup_procedure(peer_connection& peer)
+{
+	auto curr = std::chrono::steady_clock::now();
+
+	constexpr auto N = 5;
+	uint32_t ids[N]{};
+	uint8_t size = 0;
+
+	std::lock_guard<std::mutex> lock(peer.mutex);
+
+	for (auto& [id, data] : peer.reassembly_buffer)
+	{
+		if (data.received_frags_count != data.total_frags)
+			continue;
+
+		if (std::chrono::duration_cast<std::chrono::seconds>(curr - data.last_request_time).count() <
+			2 /* rerequest timeout in seconds */ * 10 )
+			continue;
+
+		ids[size++] = id;
+		if (size == N)
+			break;
+	}
+
+	while (size-- > 0)
+		peer.reassembly_buffer.erase(ids[size]);
+}
+
 void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
 {
 	// NOTE: This function is called with peer.mutex ALREADY LOCKED
@@ -477,7 +514,7 @@ void p2p_tunnel::send_fragments(peer_connection& peer_conn, uint32_t packet_id, 
 
 	if (total_frags_u8 < num_frags)
 	{
-		std::cerr << "[Tunnel] Excessive fragmentation - " << num_frags << " cannot be sent through the tunnel" << std::endl;
+		std::cerr << "[Tunnel] Excessive fragmentation - " << num_frags << " fragments cannot be sent through the tunnel" << std::endl;
 		return;
 	}
 
