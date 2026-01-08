@@ -451,6 +451,16 @@ void p2p_tunnel::internal_cleanup_procedure(peer_connection& peer)
 			break;
 	}
 
+	if (size > 0)
+	{
+		std::vector<uint8_t> req_data;
+		req_data.push_back((*ids >> 24) & 0xFF);
+		req_data.push_back((*ids >> 16) & 0xFF);
+		req_data.push_back((*ids >> 8) & 0xFF);
+		req_data.push_back(*ids & 0xFF);
+		send_control_packet(peer, PAC_LTR, req_data);
+	}
+
 	while (size-- > 0)
 		peer.reassembly_buffer.erase(ids[size]);
 }
