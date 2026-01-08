@@ -321,13 +321,17 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 			}
 
 			// Resend
-			auto buffer = std::make_shared<std::vector<uint8_t>>(it->second.data);
-			socket_.async_send_to(
-				boost::asio::buffer(*buffer),
-				peer.endpoint,
-					[this, buffer, endpoint = peer.endpoint](const boost::system::error_code& error, std::size_t bytes_transferred) {
-						handle_send(error, bytes_transferred, buffer, endpoint);
-					});
+			for (auto& fragment : it->second)
+			{
+				auto buffer = std::make_shared<std::vector<uint8_t>>(fragment.data);
+				socket_.async_send_to(
+					boost::asio::buffer(*buffer),
+					peer.endpoint,
+					[this, buffer, endpoint = peer.endpoint](const boost::system::error_code& error, std::size_t bytes_transferred)
+				{
+					handle_send(error, bytes_transferred, buffer, endpoint);
+				});
+			}
 			
 			break;
 		}
@@ -471,6 +475,17 @@ void p2p_tunnel::send_fragments(peer_connection& peer_conn, uint32_t packet_id, 
 	size_t num_frags = (total_size + MAX_FRAGMENT_SIZE - 1) / MAX_FRAGMENT_SIZE;
 	uint8_t total_frags_u8 = static_cast<uint8_t>(num_frags);
 
+	if (total_frags_u8 < num_frags)
+	{
+		std::cerr << "[Tunnel] Excessive fragmentation - " << num_frags << " cannot be sent through the tunnel" << std::endl;
+		return;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(peer_conn.mutex);
+		peer_conn.storage[packet_id].reserve(num_frags);
+	}
+
 	for (size_t i = 0; i < num_frags; ++i)
 	{
 		size_t offset = i * MAX_FRAGMENT_SIZE;
@@ -502,7 +517,7 @@ void p2p_tunnel::send_fragments(peer_connection& peer_conn, uint32_t packet_id, 
 		// Store in cache for retransmission
 		{
 			std::lock_guard<std::mutex> lock(peer_conn.mutex);
-			peer_conn.storage[packet_id] = { encoded, std::chrono::steady_clock::now() };
+			peer_conn.storage[packet_id].emplace_back(encoded, std::chrono::steady_clock::now());
 			
 			if (peer_conn.storage.size() > 4000)
 			{

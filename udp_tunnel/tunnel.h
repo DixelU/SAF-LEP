@@ -65,7 +65,7 @@ struct peer_connection
 	uint32_t last_received_index = 0;
 	std::mutex mutex;
 	std::chrono::steady_clock::time_point last_seen = std::chrono::steady_clock::now();
-	std::map<uint32_t, packet_storage> storage;
+	std::map<uint32_t, std::vector<packet_storage>> storage;
 
 	// Reassembly state (per peer)
 	std::unordered_map<uint32_t, fragment_assembly> reassembly_buffer;
