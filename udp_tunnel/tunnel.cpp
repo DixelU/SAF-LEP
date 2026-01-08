@@ -313,7 +313,12 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 			std::lock_guard<std::mutex> lock(peer.mutex);
 			auto it = peer.storage.find(req_id);
 			if (it == peer.storage.end())
+			{
+				if (VERBOSE_MODE)
+					std::cout << "[Tunnel] The request packet is missing." << std::endl;
+				send_control_packet(peer, PAC_LST, decoded.data | std::views::drop(1) | std::ranges::to<std::vector>());
 				return;
+			}
 
 			// Resend
 			auto buffer = std::make_shared<std::vector<uint8_t>>(it->second.data);
@@ -354,6 +359,21 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 				return;
 
 			peer.storage.erase(peer.storage.begin(), iter);
+		}
+		case PAC_LST:
+		{
+			if (decoded.data.size() != 5)
+				return;
+
+			uint32_t packet_id = get_u32(decoded.data, 1);
+
+			std::lock_guard<std::mutex> lock(peer.mutex);
+
+			peer.reassembly_buffer.erase(packet_id);
+			peer.reassembly_in_progress.erase(packet_id);
+			peer.late_reassembly.erase(packet_id);
+
+			std::cout << "[Tunnel] Packet " << packet_id << " marked as lost !" << std::endl;
 		}
 	}
 }

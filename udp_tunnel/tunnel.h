@@ -119,6 +119,7 @@ public:
 	static constexpr uint8_t PAC_RRQ = 19; // packet re-request
 	static constexpr uint8_t PAC_LTR = 37; // packet less-than (that index was) recieved
 	static constexpr uint8_t PAC_IWA = 45; // packet index wraparound (high index packet drop request)
+	static constexpr uint8_t PAC_LST = 72; // packet was lost - (answer to RRQ)
 
 private:
 	void start_receive();
