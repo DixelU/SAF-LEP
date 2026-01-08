@@ -382,7 +382,7 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 
 			std::lock_guard<std::mutex> lock(peer.mutex);
 
-			if (peer.reassembly_buffer.erase(packet_id))
+			if (peer.reassembly_buffer.erase(packet_id) && VERBOSE_MODE)
 				std::cout << "[Tunnel] Packet " << packet_id << " marked as lost!" << std::endl;
 			
 			peer.reassembly_in_progress.erase(packet_id);
