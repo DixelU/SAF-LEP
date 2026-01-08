@@ -9,6 +9,7 @@
     <LocalDebuggerCommandArguments> -c 159.100.30.226:57830 --ip 10.0.0.2 --gw 10.0.0.1</LocalDebuggerCommandArguments>
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
     <LocalDebuggerCommand>$(TargetPath)</LocalDebuggerCommand>
+    <LocalDebuggerCommandArgumentsHistory> -c 159.100.30.226:57830 --ip 10.0.0.2 --gw 10.0.0.1|</LocalDebuggerCommandArgumentsHistory>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LocalDebuggerCommandArguments> -c 159.100.30.226:57830 --ip 10.0.0.2 --gw 10.0.0.1</LocalDebuggerCommandArguments>
@@ -17,5 +18,6 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LocalDebuggerCommandArguments> -c 159.100.30.226:57830 --ip 10.0.0.2 --gw 10.0.0.1</LocalDebuggerCommandArguments>
     <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
+    <LocalDebuggerCommandArgumentsHistory> -c 159.100.30.226:57830 --ip 10.0.0.2 --gw 10.0.0.1 --verbose| -c 159.100.30.226:57830 --ip 10.0.0.2 --gw 10.0.0.1|</LocalDebuggerCommandArgumentsHistory>
   </PropertyGroup>
 </Project>

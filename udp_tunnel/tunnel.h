@@ -65,7 +65,7 @@ struct peer_connection
 	uint32_t last_received_index = 0;
 	std::mutex mutex;
 	std::chrono::steady_clock::time_point last_seen = std::chrono::steady_clock::now();
-	std::map<uint32_t, packet_storage> storage;
+	std::map<uint32_t, std::vector<packet_storage>> storage;
 
 	// Reassembly state (per peer)
 	std::unordered_map<uint32_t, fragment_assembly> reassembly_buffer;
@@ -119,6 +119,7 @@ public:
 	static constexpr uint8_t PAC_RRQ = 19; // packet re-request
 	static constexpr uint8_t PAC_LTR = 37; // packet less-than (that index was) recieved
 	static constexpr uint8_t PAC_IWA = 45; // packet index wraparound (high index packet drop request)
+	static constexpr uint8_t PAC_LST = 72; // packet was lost - (answer to RRQ)
 
 private:
 	void start_receive();
@@ -129,6 +130,8 @@ private:
 	void handle_fragmentation(peer_connection& peer, dixelu::lep::packet& decoded);
 	void handle_control_packet(peer_connection& peer, dixelu::lep::packet& decoded);
 	void send_control_packet(peer_connection& peer, uint8_t type, const std::vector<uint8_t>& extra_data = {});
+
+	void internal_cleanup_procedure(peer_connection& peer);
 	
 	// Refactoring helpers
 	void process_packet_gap(peer_connection& peer, uint32_t packet_id);
