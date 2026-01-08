@@ -432,6 +432,7 @@ void p2p_tunnel::internal_cleanup_procedure(peer_connection& peer)
 
 	std::lock_guard<std::mutex> lock(peer.mutex);
 
+	// remove all packets that have all request results satified and for which RRQs wont be sent again
 	for (auto& [id, data] : peer.reassembly_buffer)
 	{
 		if (data.received_frags_count != data.total_frags)
@@ -439,6 +440,10 @@ void p2p_tunnel::internal_cleanup_procedure(peer_connection& peer)
 
 		if (std::chrono::duration_cast<std::chrono::seconds>(curr - data.last_request_time).count() <
 			2 /* rerequest timeout in seconds */ * 10 )
+			continue;
+
+		// check for some REALLY lossy connection (packets are barely going through)
+		if (peer.reassembly_in_progress.contains(id) || peer.late_reassembly.contains(id))
 			continue;
 
 		ids[size++] = id;
