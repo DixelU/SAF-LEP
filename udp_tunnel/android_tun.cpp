@@ -15,8 +15,10 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGV(...) if (VERBOSE_MODE) __android_log_print(ANDROID_LOG_VERBOSE, LOG_TAG, __VA_ARGS__)
 
-namespace dixelu {
-namespace udp {
+namespace dixelu
+{
+namespace udp
+{
 
 AndroidTunAdapter::AndroidTunAdapter()
 	: fd_(-1)

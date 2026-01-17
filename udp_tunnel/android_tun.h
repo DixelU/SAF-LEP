@@ -8,8 +8,10 @@
 #include <functional>
 #include <atomic>
 
-namespace dixelu {
-namespace udp {
+namespace dixelu
+{
+namespace udp
+{
 
 /**
  * Android TUN Adapter
@@ -18,7 +20,8 @@ namespace udp {
  * Instead, it accepts a pre-opened file descriptor from Android's VpnService.
  * The FD is created by VpnService.Builder.establish() in Java/Kotlin.
  */
-class AndroidTunAdapter {
+class AndroidTunAdapter
+{
 public:
 	AndroidTunAdapter();
 	~AndroidTunAdapter();
