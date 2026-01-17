@@ -23,6 +23,8 @@
 
 #ifdef _WIN32
 #include "windows_tap.h"
+#elif defined(__ANDROID__)
+#include "android_tun.h"
 #else
 #include "linux_tun.h"
 #endif
@@ -179,8 +181,16 @@ public:
 	explicit vpn_interface(std::shared_ptr<p2p_tunnel> tunnel);
 	~vpn_interface();
 
-	// Start the VPN interface
+	// Start the VPN interface (desktop platforms)
 	bool start(const std::string& ip, const std::string& mask, const std::string& gateway = "");
+
+#if defined(__ANDROID__)
+	// Start the VPN interface with pre-opened TUN file descriptor (Android)
+	// @param tun_fd File descriptor from VpnService.Builder.establish()
+	// @return true if successful
+	bool start_android(int tun_fd);
+#endif
+
 	void stop();
 
 private:
@@ -188,6 +198,8 @@ private:
 #ifdef _WIN32
 	std::unique_ptr<TapAdapter> tap_adapter_;
 	boost::asio::ip::address_v4 local_ip_;
+#elif defined(__ANDROID__)
+	std::unique_ptr<AndroidTunAdapter> tun_adapter_;
 #else
 	std::unique_ptr<TunAdapter> tun_adapter_;
 #endif

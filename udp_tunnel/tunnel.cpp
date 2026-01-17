@@ -755,6 +755,8 @@ vpn_interface::vpn_interface(std::shared_ptr<p2p_tunnel> tunnel)
 	: tunnel_(std::move(tunnel))
 #ifdef _WIN32
 	, tap_adapter_(std::make_unique<TapAdapter>())
+#elif defined(__ANDROID__)
+	, tun_adapter_(std::make_unique<AndroidTunAdapter>())
 #else
 	, tun_adapter_(std::make_unique<TunAdapter>())
 #endif
@@ -841,6 +843,33 @@ bool vpn_interface::start(const std::string& ip, const std::string& mask, const 
 	return true;
 }
 
+#if defined(__ANDROID__)
+bool vpn_interface::start_android(int tun_fd)
+{
+	if (running_.exchange(true))
+		return true;
+
+	// Set the file descriptor from VpnService
+	if (!tun_adapter_->set_fd(tun_fd))
+	{
+		std::cerr << "Failed to set TUN file descriptor" << std::endl;
+		running_ = false;
+		return false;
+	}
+
+	// Set up tunnel callback to forward packets to adapter
+	tunnel_->set_packet_received_callback(
+		[this](const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& from) {
+			handle_tunnel_packet(data, from);
+		});
+
+	// Start reading from adapter
+	read_thread_ = std::thread(&vpn_interface::read_from_tap, this);
+
+	return true;
+}
+#endif // __ANDROID__
+
 void vpn_interface::stop()
 {
 	if (!running_.exchange(false))
@@ -889,6 +918,7 @@ void vpn_interface::read_from_tap()
 			}
 		}
 #else
+		// Linux and Android both use TUN (Layer 3, raw IP packets)
 		auto packet = tun_adapter_->read();
 		if (!packet.empty())
 		{
