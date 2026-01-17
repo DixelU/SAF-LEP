@@ -129,6 +129,9 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 		auto decoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::decode(
 			receive_buffer_.data(), bytes_transferred);
 
+		// Decrypt after LEP decoding (using packet index from LEP header)
+		lep::crypto::transform(encryption_key_, decoded.index, decoded.data);
+
 		// Check if this is a new connection
 		auto& peer = get_or_create_peer(remote_endpoint_);
 		{
@@ -397,7 +400,7 @@ void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const 
 	payload.reserve(1 + extra_data.size());
 	payload.push_back(type);
 	payload.insert(payload.end(), extra_data.begin(), extra_data.end());
-	
+
 	// Encode with next index
 	uint16_t index;
 	{
@@ -406,7 +409,10 @@ void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const 
 		// Control packets consume an index sequence to keep LEP encryption synchronized
 		index = peer.next_send_index++;
 	}
-	
+
+	// Encrypt payload before LEP encoding
+	lep::crypto::transform(encryption_key_, index, payload);
+
 	auto encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::encode(
 		payload.data(), payload.size(), index);
 		
@@ -556,6 +562,9 @@ void p2p_tunnel::send_fragments(peer_connection& peer_conn, uint32_t packet_id, 
 
 		payload.insert(payload.end(), data.begin() + offset, data.begin() + offset + chunk_size);
 
+		// Encrypt payload before LEP encoding
+		lep::crypto::transform(encryption_key_, packet_id, payload);
+
 		// Encode with LEP
 		auto encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::encode(
 			payload.data(), payload.size(), static_cast<uint16_t>(packet_id));
@@ -670,6 +679,25 @@ void p2p_tunnel::set_packet_received_callback(packet_received_callback cb)
 void p2p_tunnel::set_connection_callback(connection_callback cb)
 {
 	connection_callback_ = std::move(cb);
+}
+
+void p2p_tunnel::set_encryption_key(const std::string& seed_key)
+{
+	if (seed_key.empty())
+	{
+		encryption_key_ = {};
+		return;
+	}
+
+	encryption_key_ = lep::crypto::derive_key(seed_key);
+
+	if (VERBOSE_MODE)
+	{
+		std::cout << "[Tunnel] Encryption key set from seed (first 4 bytes: ";
+		for (int i = 0; i < 4; ++i)
+			std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)encryption_key_[i];
+		std::cout << std::dec << "...)" << std::endl;
+	}
 }
 
 std::vector<boost::asio::ip::udp::endpoint> p2p_tunnel::get_connected_peers() const

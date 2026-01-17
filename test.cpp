@@ -21,6 +21,7 @@ void print_usage(const char* program_name)
 	std::cout << "      --ip IP                   VPN IP address (e.g. 10.0.0.1)" << std::endl;
 	std::cout << "      --mask MASK               VPN Subnet mask (default: 255.255.255.0)" << std::endl;
 	std::cout << "      --gw GATEWAY              VPN Gateway (optional)" << std::endl;
+	std::cout << "  -k, --seed-key KEY            Encryption seed key (optional)" << std::endl;
 	std::cout << "  -h, --help                    Show this help message" << std::endl;
 	std::cout << "\nExamples:" << std::endl;
 
@@ -37,6 +38,7 @@ int main(int argc, char* argv[])
 	std::string vpn_ip;
 	std::string vpn_mask = "255.255.255.0";
 	std::string vpn_gw;
+	std::string seed_key;
 
 	// Parse command line arguments
 	for (int i = 1; i < argc; ++i)
@@ -71,6 +73,10 @@ int main(int argc, char* argv[])
 		{
 			if (i + 1 < argc) vpn_gw = argv[++i];
 		}
+		else if (arg == "-k" || arg == "--seed-key")
+		{
+			if (i + 1 < argc) seed_key = argv[++i];
+		}
 	}
 
 	if (vpn_ip.empty())
@@ -84,7 +90,14 @@ int main(int argc, char* argv[])
 	{
 		// Create P2P tunnel
 		auto tunnel = std::make_shared<p2p_tunnel>(local_port);
-		
+
+		// Set encryption key if provided
+		if (!seed_key.empty())
+		{
+			tunnel->set_encryption_key(seed_key);
+			std::cout << "[Tunnel] Encryption enabled with seed key" << std::endl;
+		}
+
 		// Create VPN interface
 		auto vpn = std::make_shared<vpn_interface>(tunnel);
 

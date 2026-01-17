@@ -3,21 +3,22 @@
 #ifndef SAF_LEP_P2P_TUNNEL_H
 #define SAF_LEP_P2P_TUNNEL_H
 
+#include <array>
+#include <atomic>
 #include <boost/asio.hpp>
 #include <boost/version.hpp>
-#include <memory>
+#include <chrono>
 #include <functional>
-#include <unordered_map>
-#include <mutex>
-#include <thread>
-#include <atomic>
-#include <vector>
-#include <array>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <string>
-#include <chrono>
+#include <thread>
+#include <unordered_map>
+#include <vector>
 
+#include "../lep/encryption.h"
 #include "../lep/low_entropy_protocol.h"
 
 #ifdef _WIN32
@@ -110,6 +111,9 @@ public:
 	void set_packet_received_callback(packet_received_callback cb);
 	void set_connection_callback(connection_callback cb);
 
+	// Set encryption key from seed string
+	void set_encryption_key(const std::string& seed_key);
+
 	// Get connected peers
 	std::vector<boost::asio::ip::udp::endpoint> get_connected_peers() const;
 
@@ -163,6 +167,9 @@ private:
 	static constexpr size_t MAX_FRAGMENT_SIZE = 150;
 
 	static std::string endpoint_to_string(const boost::asio::ip::udp::endpoint& ep);
+
+	// Encryption key (derived from seed)
+	std::array<uint8_t, lep::crypto::KEY_SIZE> encryption_key_{};
 };
 
 // VPN-like interface for packet forwarding
