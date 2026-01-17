@@ -76,7 +76,7 @@ constexpr lep_data decode_lep(uint8_t byte, uint8_t ground_state)
 
 constexpr uint8_t embedded_test(uint8_t length)
 {
-	constexpr static uint8_t ground_state = 'T';
+	static constexpr uint8_t ground_state{'T'};
 	for (uint16_t value = 0; value < (1 << length); value++)
 	{
 		const auto encoded_value = encode_lep(static_cast<uint8_t>(value), length, ground_state);
@@ -92,13 +92,15 @@ constexpr uint8_t embedded_test(uint8_t length)
 
 struct lep_v0_encoder_state
 {
-	std::uint16_t index = 0;
+	std::uint32_t index = 0;
 	std::uint32_t g_seed = 0;
 
-	constexpr int fastrand()
+	static constexpr uint8_t HEADER = 0b00110001;
+
+	constexpr std::uint32_t fastrand()
 	{
-		g_seed = 21401 * g_seed + 25311;
-		return (g_seed >> 8) & 0xFF;
+		g_seed = 21401u * g_seed + 25311u;
+		return (g_seed >> 8u) & 0xFFu;
 	}
 };
 
@@ -110,18 +112,20 @@ constexpr std::vector<uint8_t> put_lep_v0(lep_v0_encoder_state &state, const uin
 
 	const uint8_t ground_state = '^' - (state.fastrand() & 0x7);
 	std::vector<uint8_t> encoded_data(header_size, 0);
-	encoded_data.reserve(size * 3);
+	encoded_data.reserve(size * 3 + 12);
 
-	encoded_data[0] = 0b00110000;
-	//			^^  ^^^^
+	encoded_data[0] = lep_v0_encoder_state::HEADER;
+	//		    ^^  ^^^^
 	//		version	 "hash"
 
 	encoded_data[1] = 0b00100001;
-	//			^
+	//		      ^
 	//		burst bit;	everything else is "payload type"; 33 ~ MP2T
 
-	encoded_data[2] = state.index >> 8;
+	encoded_data[2] = (state.index >> 8) & 0xFF;
 	encoded_data[3] = state.index & 0xFF;
+	encoded_data[8] = (state.index >> 16) & 0xFF ^ encoded_data[2];
+	encoded_data[9] = ((state.index >> 24) & 0xFF) ^ encoded_data[3] ^ encoded_data[2];
 	state.index++;
 
 	encoded_data[4] = ground_state ^ encoded_data[1]; // ground state bit;
@@ -168,7 +172,7 @@ constexpr std::vector<uint8_t> put_lep_v0(lep_v0_encoder_state &state, const uin
 struct lep_decoded_packet
 {
 	std::vector<uint8_t> data;
-	uint16_t index = 0;
+	uint32_t index = 0;
 };
 
 constexpr lep_decoded_packet get_lep_v0(const uint8_t *data, std::size_t size)
@@ -178,13 +182,16 @@ constexpr lep_decoded_packet get_lep_v0(const uint8_t *data, std::size_t size)
 		return {};
 
 	uint8_t first_header_byte = data[0];
-	if (first_header_byte != 0b00110000)
+	if (first_header_byte != lep_v0_encoder_state::HEADER)
 		return {};
 
 	lep_decoded_packet decoded_packet;
 	uint8_t second_header_byte = data[1];
 
 	decoded_packet.index = (data[2] << 8) | data[3];
+	decoded_packet.index |= (data[8] ^ data[2]) << 16;
+	decoded_packet.index |= (data[9] ^ data[2] ^ data[3]) << 24;
+
 	uint8_t ground_state = second_header_byte ^ data[4];
 	uint8_t bit_index = 0;
 	uint8_t buffered_byte = 0;
@@ -234,14 +241,14 @@ struct raw_lep_v0;
 struct packet
 {
 	std::vector<std::uint8_t> data;
-	uint16_t index = 0;
+	uint32_t index = 0;
 };
 
 template<typename tag>
 struct low_entropy_protocol
 {
 	static constexpr std::vector<std::uint8_t>
-		encode(const std::uint8_t *data, std::size_t size, uint16_t index = 0);
+		encode(const std::uint8_t *data, std::size_t size, uint32_t index = 0);
 
 	static constexpr packet
 		decode(const std::uint8_t *data, std::size_t size);
@@ -249,14 +256,14 @@ struct low_entropy_protocol
 
 template <>
 constexpr std::vector<std::uint8_t> low_entropy_protocol<raw_lep_v0>::encode(
-	const std::uint8_t* data, std::size_t size, uint16_t index)
+	const std::uint8_t* data, std::size_t size, uint32_t index)
 {
 	details::v0::lep_v0_encoder_state encoder;
 	encoder.index = index;
 
 	if consteval
 	{
-		encoder.g_seed = index ^ static_cast<uint16_t>(size);
+		encoder.g_seed = index ^ size;
 	}
 	else
 	{

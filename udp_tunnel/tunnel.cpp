@@ -402,7 +402,7 @@ void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const 
 	payload.insert(payload.end(), extra_data.begin(), extra_data.end());
 
 	// Encode with next index
-	uint16_t index;
+	uint32_t index;
 	{
 		// Assumes peer.mutex is ALREADY LOCKED by the caller
 		// std::lock_guard<std::mutex> lock(peer.mutex);
@@ -567,7 +567,7 @@ void p2p_tunnel::send_fragments(peer_connection& peer_conn, uint32_t packet_id, 
 
 		// Encode with LEP
 		auto encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::encode(
-			payload.data(), payload.size(), static_cast<uint16_t>(packet_id));
+			payload.data(), payload.size(), packet_id);
 
 		if (encoded.empty())
 		{
