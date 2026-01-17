@@ -106,13 +106,13 @@ struct lep_v0_encoder_state
 
 constexpr std::vector<uint8_t> put_lep_v0(lep_v0_encoder_state &state, const uint8_t *data, std::size_t size)
 {
-	constexpr int header_size = 8;
+	constexpr int header_size = 10;
 	if (size > (1 << (24 - 2)))
 		return {};
 
 	const uint8_t ground_state = '^' - (state.fastrand() & 0x7);
 	std::vector<uint8_t> encoded_data(header_size, 0);
-	encoded_data.reserve(size * 3 + 12);
+	encoded_data.reserve(size * 3 + header_size);
 
 	encoded_data[0] = lep_v0_encoder_state::HEADER;
 	//		    ^^  ^^^^
