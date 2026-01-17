@@ -177,7 +177,7 @@ struct lep_decoded_packet
 
 constexpr lep_decoded_packet get_lep_v0(const uint8_t *data, std::size_t size)
 {
-	constexpr int header_size = 8;
+	constexpr int header_size = 10;
 	if (size <= header_size)
 		return {};
 
