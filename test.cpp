@@ -3,6 +3,17 @@
 #include <thread>
 #include <chrono>
 #include <vector>
+#include <iomanip>
+#include <sstream>
+#include <atomic>
+
+#ifdef _WIN32
+#include <conio.h>
+#else
+#include <termios.h>
+#include <unistd.h>
+#include <sys/select.h>
+#endif
 
 #include "lep/low_entropy_protocol.h"
 
@@ -18,6 +29,7 @@ void print_usage(const char* program_name)
 	std::cout << "  -p, --port PORT               Local UDP port (default: 0 = auto)" << std::endl;
 	std::cout << "  -c, --connect HOST:PORT       Connect to peer" << std::endl;
 	std::cout << "  -v, --verbose                 Enable verbose logging" << std::endl;
+	std::cout << "  -w, --watchscreen             Enable live stats watchscreen" << std::endl;
 	std::cout << "      --ip IP                   VPN IP address (e.g. 10.0.0.1)" << std::endl;
 	std::cout << "      --mask MASK               VPN Subnet mask (default: 255.255.255.0)" << std::endl;
 	std::cout << "      --gw GATEWAY              VPN Gateway (optional)" << std::endl;
@@ -25,10 +37,185 @@ void print_usage(const char* program_name)
 	std::cout << "  -h, --help                    Show this help message" << std::endl;
 	std::cout << "\nExamples:" << std::endl;
 
-	std::cout << "  " << program_name << 
+	std::cout << "  " << program_name <<
 		" -p 5000 --ip 10.0.0.1               # Run as server/peer 1" << std::endl;
-	std::cout << "  " << program_name << 
+	std::cout << "  " << program_name <<
 		" -c 127.0.0.1:5000 --ip 10.0.0.2     # Connect to peer 1" << std::endl;
+	std::cout << "  " << program_name <<
+		" -w -c 127.0.0.1:5000 --ip 10.0.0.2  # With live watchscreen" << std::endl;
+}
+
+// Format bytes to human readable
+std::string format_bytes(uint64_t bytes)
+{
+	const char* units[] = {"B", "KB", "MB", "GB"};
+	int unit_index = 0;
+	double value = static_cast<double>(bytes);
+
+	while (value >= 1024.0 && unit_index < 3)
+	{
+		value /= 1024.0;
+		unit_index++;
+	}
+
+	std::ostringstream oss;
+	oss << std::fixed << std::setprecision(1) << value << " " << units[unit_index];
+	return oss.str();
+}
+
+// Format throughput
+std::string format_throughput(uint64_t bytes_per_sec)
+{
+	return format_bytes(bytes_per_sec) + "/s";
+}
+
+// Get packet event type name
+const char* event_type_name(packet_event_type type)
+{
+	switch (type)
+	{
+		case packet_event_type::received: return "RECV";
+		case packet_event_type::sent: return "SENT";
+		case packet_event_type::lost: return "LOST";
+		case packet_event_type::retransmit_requested: return "RRQ ";
+		case packet_event_type::retransmitted: return "RTXM";
+		case packet_event_type::fragment_received: return "FRAG";
+		case packet_event_type::reassembled: return "RASM";
+		default: return "????";
+	}
+}
+
+// Check if key was pressed (non-blocking)
+bool key_pressed()
+{
+#ifdef _WIN32
+	return _kbhit() != 0;
+#else
+	fd_set fds;
+	FD_ZERO(&fds);
+	FD_SET(STDIN_FILENO, &fds);
+
+	struct timeval tv;
+	tv.tv_sec = 0;
+	tv.tv_usec = 0;
+
+	return select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv) > 0;
+#endif
+}
+
+// Clear screen
+void clear_screen()
+{
+#ifdef _WIN32
+	system("cls");
+#else
+	std::cout << "\033[2J\033[H";
+#endif
+}
+
+// Watchscreen display function
+void run_watchscreen(std::shared_ptr<p2p_tunnel> tunnel, std::atomic<bool>& running)
+{
+	uint64_t last_bytes_sent = 0;
+	uint64_t last_bytes_received = 0;
+	auto last_time = std::chrono::steady_clock::now();
+
+	while (running)
+	{
+		auto now = std::chrono::steady_clock::now();
+		auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_time).count();
+
+		if (elapsed_ms < 500) // Update every 500ms
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			if (key_pressed())
+			{
+				running = false;
+				break;
+			}
+			continue;
+		}
+
+		auto& stats = tunnel->get_stats();
+
+		// Calculate throughput
+		uint64_t curr_sent = stats.bytes_sent.load();
+		uint64_t curr_recv = stats.bytes_received.load();
+
+		double elapsed_sec = elapsed_ms / 1000.0;
+		uint64_t send_rate = static_cast<uint64_t>((curr_sent - last_bytes_sent) / elapsed_sec);
+		uint64_t recv_rate = static_cast<uint64_t>((curr_recv - last_bytes_received) / elapsed_sec);
+
+		last_bytes_sent = curr_sent;
+		last_bytes_received = curr_recv;
+		last_time = now;
+
+		// Clear and redraw
+		clear_screen();
+
+		std::cout << "====== SAF-LEP VPN Watchscreen ======" << std::endl;
+		std::cout << "Press any key to stop..." << std::endl;
+		std::cout << std::endl;
+
+		// Connection info
+		auto peers = tunnel->get_connected_peers();
+		std::cout << "[ Peers: " << peers.size() << " ]" << std::endl;
+		for (const auto& peer : peers)
+		{
+			std::cout << "  - " << peer.address().to_string() << ":" << peer.port() << std::endl;
+		}
+		std::cout << std::endl;
+
+		// Throughput
+		std::cout << "[ Throughput ]" << std::endl;
+		std::cout << "  TX: " << std::setw(12) << format_throughput(send_rate)
+		          << "  (total: " << format_bytes(curr_sent) << ")" << std::endl;
+		std::cout << "  RX: " << std::setw(12) << format_throughput(recv_rate)
+		          << "  (total: " << format_bytes(curr_recv) << ")" << std::endl;
+		std::cout << std::endl;
+
+		// Stats summary
+		std::cout << "[ Packets ]" << std::endl;
+		std::cout << "  Sent: " << stats.packets_sent.load()
+		          << "  |  Recv: " << stats.packets_received.load()
+		          << "  |  Lost: " << stats.packets_lost.load()
+		          << "  |  RRQ: " << stats.retransmit_requests.load() << std::endl;
+		std::cout << std::endl;
+
+		// Recent packet events
+		std::cout << "[ Recent Packets ]" << std::endl;
+		auto events = stats.get_events();
+		if (events.empty())
+		{
+			std::cout << "  (no packets yet)" << std::endl;
+		}
+		else
+		{
+			for (const auto& evt : events)
+			{
+				auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - evt.timestamp).count();
+				std::cout << "  [" << event_type_name(evt.type) << "] "
+				          << "ID:" << std::setw(8) << evt.packet_id << "  "
+				          << std::setw(6) << evt.bytes << "B  "
+				          << std::setw(6) << age_ms << "ms ago  "
+				          << evt.peer_info << std::endl;
+			}
+		}
+		std::cout << std::endl;
+
+		// Log lines
+		auto logs = stats.get_logs();
+		if (!logs.empty())
+		{
+			std::cout << "[ Logs ]" << std::endl;
+			for (const auto& line : logs)
+			{
+				std::cout << "  " << line << std::endl;
+			}
+		}
+
+		std::cout.flush();
+	}
 }
 
 int main(int argc, char* argv[])
@@ -39,6 +226,7 @@ int main(int argc, char* argv[])
 	std::string vpn_mask = "255.255.255.0";
 	std::string vpn_gw;
 	std::string seed_key;
+	bool watchscreen_mode = false;
 
 	// Parse command line arguments
 	for (int i = 1; i < argc; ++i)
@@ -60,6 +248,10 @@ int main(int argc, char* argv[])
 		else if (arg == "-v" || arg == "--verbose")
 		{
 			VERBOSE_MODE = true;
+		}
+		else if (arg == "-w" || arg == "--watchscreen")
+		{
+			watchscreen_mode = true;
 		}
 		else if (arg == "--ip")
 		{
@@ -142,8 +334,19 @@ int main(int argc, char* argv[])
 			tunnel->connect_to_peer(host, port);
 		}
 
-		std::cout << "\n[System] VPN is running. Press Enter to stop..." << std::endl;
-		std::cin.get();
+		if (watchscreen_mode)
+		{
+			std::cout << "\n[System] VPN is running with watchscreen. Starting..." << std::endl;
+			std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+			std::atomic<bool> watchscreen_running{true};
+			run_watchscreen(tunnel, watchscreen_running);
+		}
+		else
+		{
+			std::cout << "\n[System] VPN is running. Press Enter to stop..." << std::endl;
+			std::cin.get();
+		}
 
 		// Stop everything
 		vpn->stop();

@@ -119,9 +119,15 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 
 	// Update peer activity
 	update_peer_activity(remote_endpoint_);
-	
+
+	// Track stats
+	stats_.bytes_received += bytes_transferred;
+
 	if (VERBOSE_MODE)
+	{
 		std::cout << "[Tunnel] Received " << bytes_transferred << " bytes from " << endpoint_to_string(remote_endpoint_) << std::endl;
+		stats_.add_log("[Tunnel] Received " + std::to_string(bytes_transferred) + " bytes from " + endpoint_to_string(remote_endpoint_));
+	}
 
 	// Decode LEP packet
 	try
@@ -205,7 +211,14 @@ void p2p_tunnel::handle_send(const boost::system::error_code& error, std::size_t
 	std::shared_ptr<std::vector<uint8_t>> buffer, const boost::asio::ip::udp::endpoint& target)
 {
 	if (error)
+	{
 		std::cerr << "Async send error to " << endpoint_to_string(target) << ": " << error.message() << std::endl;
+		stats_.add_log("[Error] Send failed to " + endpoint_to_string(target));
+	}
+	else
+	{
+		stats_.bytes_sent += bytes_transferred;
+	}
 }
 
 static uint32_t get_u32(const std::vector<uint8_t>& value, size_t index)
@@ -300,9 +313,13 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 		} // Unlock peer.mutex
 
 		// Call callback outside lock
-		if (!completed_packet.empty() && packet_callback_)
+		if (!completed_packet.empty())
 		{
-			packet_callback_(completed_packet, remote_endpoint_);
+			stats_.packets_received++;
+			stats_.add_event(packet_event_type::received, packet_id, completed_packet.size(), endpoint_to_string(remote_endpoint_));
+
+			if (packet_callback_)
+				packet_callback_(completed_packet, remote_endpoint_);
 		}
 	}
 }
@@ -319,20 +336,30 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 				return;
 
 			uint32_t req_id = get_u32(decoded.data, 1);
+			stats_.retransmit_requests++;
+			stats_.add_event(packet_event_type::retransmit_requested, req_id, 0, endpoint_to_string(peer.endpoint));
+
 			if (VERBOSE_MODE)
+			{
 				std::cout << "[Tunnel] Received RRQ for packet " << req_id << std::endl;
-			
+				stats_.add_log("[Tunnel] RRQ for packet " + std::to_string(req_id));
+			}
+
 			std::lock_guard<std::mutex> lock(peer.mutex);
 			auto it = peer.storage.find(req_id);
 			if (it == peer.storage.end())
 			{
 				if (VERBOSE_MODE)
+				{
 					std::cout << "[Tunnel] The request packet is missing." << std::endl;
+					stats_.add_log("[Tunnel] Packet " + std::to_string(req_id) + " missing for RRQ");
+				}
 				send_control_packet(peer, PAC_LST, decoded.data | std::views::drop(1) | std::ranges::to<std::vector>());
 				return;
 			}
 
 			// Resend
+			stats_.add_event(packet_event_type::retransmitted, req_id, 0, endpoint_to_string(peer.endpoint));
 			for (auto& fragment : it->second)
 			{
 				auto buffer = std::make_shared<std::vector<uint8_t>>(fragment.data);
@@ -344,7 +371,7 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 					handle_send(error, bytes_transferred, buffer, endpoint);
 				});
 			}
-			
+
 			break;
 		}
 		case PAC_IWA:
@@ -385,9 +412,17 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 
 			std::lock_guard<std::mutex> lock(peer.mutex);
 
-			if (peer.reassembly_buffer.erase(packet_id) && VERBOSE_MODE)
-				std::cout << "[Tunnel] Packet " << packet_id << " marked as lost!" << std::endl;
-			
+			if (peer.reassembly_buffer.erase(packet_id))
+			{
+				stats_.packets_lost++;
+				stats_.add_event(packet_event_type::lost, packet_id, 0, endpoint_to_string(peer.endpoint));
+				if (VERBOSE_MODE)
+				{
+					std::cout << "[Tunnel] Packet " << packet_id << " marked as lost!" << std::endl;
+					stats_.add_log("[Tunnel] Packet " + std::to_string(packet_id) + " lost");
+				}
+			}
+
 			peer.reassembly_in_progress.erase(packet_id);
 			peer.late_reassembly.erase(packet_id);
 		}
@@ -538,6 +573,10 @@ void p2p_tunnel::send_fragments(peer_connection& peer_conn, uint32_t packet_id, 
 		std::cerr << "[Tunnel] Excessive fragmentation - " << num_frags << " fragments cannot be sent through the tunnel" << std::endl;
 		return;
 	}
+
+	// Track sent packet
+	stats_.packets_sent++;
+	stats_.add_event(packet_event_type::sent, packet_id, total_size, endpoint_to_string(peer_conn.endpoint));
 
 	{
 		std::lock_guard<std::mutex> lock(peer_conn.mutex);

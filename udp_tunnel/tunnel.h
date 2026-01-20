@@ -9,6 +9,7 @@
 #include <boost/version.hpp>
 #include <chrono>
 #include <functional>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -46,6 +47,75 @@ struct packet_storage
 {
 	std::vector<uint8_t> data;
 	std::chrono::steady_clock::time_point tp;
+};
+
+// Packet event types for watchscreen
+enum class packet_event_type
+{
+	received,
+	sent,
+	lost,
+	retransmit_requested,
+	retransmitted,
+	fragment_received,
+	reassembled
+};
+
+// Single packet event for tracking
+struct packet_event
+{
+	packet_event_type type;
+	uint32_t packet_id;
+	size_t bytes;
+	std::chrono::steady_clock::time_point timestamp;
+	std::string peer_info;
+};
+
+// Tunnel statistics for watchscreen
+struct tunnel_stats
+{
+	std::atomic<uint64_t> bytes_sent{0};
+	std::atomic<uint64_t> bytes_received{0};
+	std::atomic<uint64_t> packets_sent{0};
+	std::atomic<uint64_t> packets_received{0};
+	std::atomic<uint64_t> packets_lost{0};
+	std::atomic<uint64_t> retransmit_requests{0};
+
+	mutable std::mutex events_mutex;
+	std::deque<packet_event> recent_events;
+	static constexpr size_t MAX_EVENTS = 10;
+
+	mutable std::mutex log_mutex;
+	std::deque<std::string> log_lines;
+	static constexpr size_t MAX_LOG_LINES = 8;
+
+	void add_event(packet_event_type type, uint32_t packet_id, size_t bytes, const std::string& peer)
+	{
+		std::lock_guard<std::mutex> lock(events_mutex);
+		recent_events.push_back({type, packet_id, bytes, std::chrono::steady_clock::now(), peer});
+		while (recent_events.size() > MAX_EVENTS)
+			recent_events.pop_front();
+	}
+
+	void add_log(const std::string& line)
+	{
+		std::lock_guard<std::mutex> lock(log_mutex);
+		log_lines.push_back(line);
+		while (log_lines.size() > MAX_LOG_LINES)
+			log_lines.pop_front();
+	}
+
+	std::vector<packet_event> get_events() const
+	{
+		std::lock_guard<std::mutex> lock(events_mutex);
+		return {recent_events.begin(), recent_events.end()};
+	}
+
+	std::vector<std::string> get_logs() const
+	{
+		std::lock_guard<std::mutex> lock(log_mutex);
+		return {log_lines.begin(), log_lines.end()};
+	}
 };
 
 struct fragment_assembly
@@ -122,6 +192,10 @@ public:
 	// Check if peer is connected
 	bool is_peer_connected(const boost::asio::ip::udp::endpoint& peer) const;
 
+	// Get statistics for watchscreen
+	tunnel_stats& get_stats() { return stats_; }
+	const tunnel_stats& get_stats() const { return stats_; }
+
 	static constexpr uint8_t PAC_RRQ = 19; // packet re-request
 	static constexpr uint8_t PAC_LTR = 37; // packet less-than (that index was) recieved
 	static constexpr uint8_t PAC_IWA = 45; // packet index wraparound (high index packet drop request)
@@ -172,6 +246,9 @@ private:
 
 	// Encryption key (derived from seed)
 	std::array<uint8_t, lep::crypto::KEY_SIZE> encryption_key_{};
+
+	// Statistics for watchscreen
+	tunnel_stats stats_;
 };
 
 // VPN-like interface for packet forwarding
