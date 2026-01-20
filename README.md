@@ -4,6 +4,22 @@ SAF-LEP is a Proof-of-Concept VPN tunneling tool designed to evade Deep Packet I
 
 The core idea is **Low Entropy Protocol (LEP)**: instead of sending a solid block of high-entropy encrypted data (which is easily flagged by DPI as "unknown encrypted protocol" or WireGuard/OpenVPN), LEP embeds the encrypted payload into a larger, lower-entropy frame, or distributes it in a way that statistically resembles natural data.
 
+---
+
+## Security Notice
+
+> **This is a Proof-of-Concept project for research and educational purposes only.**
+
+**DO NOT use this for protecting sensitive data.** The cryptographic implementation is intentionally simplified for demonstration purposes and has known weaknesses:
+
+- Custom stream cipher based on xorshift - **not cryptographically secure**
+- Key derivation uses DJB2 hash instead of proper KDFs (PBKDF2, Argon2)
+- Non-cryptographic PRNG (LCG) for ground state generation
+
+The goal of this project is **DPI evasion**, not secure encryption. If you need actual security, use established VPNs (WireGuard, OpenVPN) or layer this tool with proper encryption.
+
+---
+
 ## Features
 - **Cross-Platform**: Runs on **Windows** (using TAP-Windows adapter) and **Linux** (using TUN interface).
 - **P2P Architecture**: UDP-based tunneling with NAT traversal capabilities.
@@ -135,4 +151,54 @@ traceroute 8.8.8.8 # Linux
 ### Windows: "Unidentified Network"
 - This is normal for TAP adapters without a default gateway. It does not affect functionality as long as the routes are correct.
 
+---
+
+## Known Limitations
+
+### Design Limitations (By Design for PoC)
+
+- **Weak Cryptography**: Intentionally simplified; see Security Notice above
+- **No Perfect Forward Secrecy**: Static keys only
+- **No Authentication**: Peers are not cryptographically authenticated
+- **Hardcoded MAC Addresses**: Uses fixed dummy MAC for ARP responses
+
+### Contributions Welcome
+
+PRs for improvements and new encoding modes are welcome!
+
+---
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────┐
+│              Application Layer                      │
+│     (Ping, HTTP, etc. on VPN interface)             │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────┐
+│           VPN Interface Layer                       │
+│    (TAP/TUN adapter - Ethernet/IP packets)          │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────┐
+│       Fragmentation/Reassembly Layer                │
+│       (Splits packets into 150-byte chunks)         │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────┐
+│            Encryption Layer                         │
+│         (XOR-based stream cipher)                   │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────┐
+│    Low Entropy Protocol (LEP) Encoding              │
+│   (Embeds encrypted data in low-entropy frames)     │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────┐
+│           UDP/IP Layer (Boost.ASIO)                 │
+│        (Sends encoded packets over UDP)             │
+└─────────────────────────────────────────────────────┘
+```
 

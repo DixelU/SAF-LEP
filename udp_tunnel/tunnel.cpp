@@ -223,6 +223,8 @@ void p2p_tunnel::handle_send(const boost::system::error_code& error, std::size_t
 
 static uint32_t get_u32(const std::vector<uint8_t>& value, size_t index)
 {
+	if (index + 4 > value.size()) [[unlikely]]
+		return 0;
 	return (value[index + 0] << 24) | (value[index + 1] << 16) | (value[index + 2] << 8) | value[index + 3];
 }
 
