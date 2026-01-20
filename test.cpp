@@ -195,7 +195,7 @@ void run_watchscreen(std::shared_ptr<p2p_tunnel> tunnel, std::atomic<bool>& runn
 			{
 				auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - evt.timestamp).count();
 				std::cout << "  [" << event_type_name(evt.type) << "] "
-				          << "ID:" << std::setw(8) << evt.packet_id << "  "
+				          << "ID:" << std::setw(15) << evt.packet_id << "  "
 				          << std::setw(6) << evt.bytes << "B  "
 				          << std::setw(6) << age_ms << "ms ago  "
 				          << evt.peer_info << std::endl;
