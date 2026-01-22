@@ -404,6 +404,8 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 				return;
 
 			peer.storage.erase(peer.storage.begin(), iter);
+
+			break;
 		}
 		case PAC_LST:
 		{
