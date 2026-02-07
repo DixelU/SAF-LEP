@@ -21,28 +21,43 @@ The goal of this project is **DPI evasion**, not secure encryption. If you need 
 ---
 
 ## Features
-- **Cross-Platform**: Runs on **Windows** (using TAP-Windows adapter) and **Linux** (using TUN interface).
+- **Cross-Platform**: Runs on **Windows** (using TAP-Windows adapter) and **Linux** (using TUN interface). **Android** support is in progress.
 - **P2P Architecture**: UDP-based tunneling with NAT traversal capabilities.
 - **Fragmentation & Reassembly**: Custom reliability layer over UDP to handle large IP packets (MTU 1500) over smaller UDP datagrams.
 - **Resiliency**: Implements packet loss detection and retransmission (ARQ) with backoff logic to prevent network flooding.
-- **DPI Evasion**: 
+- **Live Watchscreen**: Real-time monitoring of VPN statistics, throughput, and packet events with `-w` flag.
+- **DPI Evasion**:
     - **Low Entropy Encoding**: Payload is encoded to reduce statistical randomness.
     - **Jitter/Padding**: (Planned) Traffic shaping to hide packet timing signatures.
 
 --- 
 
-## Near future plans
+## Platform Support
 
-- **Android VPN Client** (Server mode would come later)
-    - High priority !!!
-- Fully automatic setup ( just address and mode flag, nothing more 😅)
-    - Might be implemented along with Android client
+### ✅ Fully Implemented
+- **Windows** (TAP-Windows adapter)
+- **Linux** (TUN interface)
+
+### 🚧 In Progress
+- **Android** (VpnService API) - JNI bridge and core C++ integration complete, but full app not yet finalized. See `android/` directory for bare-bones implementation.
+
+### 📋 Planned
+- **Android Server Mode** - Allow Android devices to act as VPN exit nodes
+- **iOS** Support - Using NetworkExtension framework
+- **macOS** Support - Using utun interface
+
+## Near Future Plans
+
+- **Complete Android VPN Client** - Finish the Android app with proper UI and integration
+    - High priority ⭐
+- Fully automatic setup (just address and mode flag, nothing more 😅)
 - Containerized version (Docker)
 - More encoding "modes" (currently only `raw_lep_v0` is implemented - partially VoIP/MPEG1 like headers with near-constant value fields)
     - `html`
     - `raw_text`
     - `rtsp`
     - ... whatever 💁
+- Improved NAT traversal (STUN/TURN integration)
 
 ---
 
@@ -62,16 +77,50 @@ make
 ```
 
 ### Windows
+
+#### Option 1: CMake Build
 1. Open the folder in Visual Studio (or use CMake GUI).
 2. Ensure `Boost_ROOT` is set if not in standard paths.
 3. Build the `SAF-LEP.exe` target.
 
-#### *OR*
-Open SAF-LEP-ExPuN solution file in Visual Studio. It requires static boost libraries to be installed through vcpkg globally.
+#### Option 2: Visual Studio Solution (Recommended)
+Open `SAF-LEP-ExPuN.sln` in Visual Studio. Requires static Boost libraries installed via vcpkg:
+```bash
+# Install vcpkg globally if not already installed
+git clone https://github.com/Microsoft/vcpkg.git
+cd vcpkg
+.\bootstrap-vcpkg.bat
+.\vcpkg integrate install
+
+# Install Boost
+.\vcpkg install boost:x64-windows-static
+```
+
+### Android (Work in Progress)
+**Note:** Android support is currently in development.
+
+For developers interested in contributing or testing, see the [Android README](android/README.md) for the current state and build instructions.
 
 ---
 
-## Usage Instructions 
+## Usage Instructions
+
+### Command-Line Options
+
+```
+Usage: SAF-LEP [OPTIONS]
+
+Options:
+  -p, --port PORT          Local UDP port (default: 0 = auto)
+  -c, --connect HOST:PORT  Connect to peer
+  -v, --verbose            Enable verbose logging
+  -w, --watchscreen        Enable live stats watchscreen
+      --ip IP              VPN IP address (e.g. 10.0.0.1)
+      --mask MASK          VPN Subnet mask (default: 255.255.255.0)
+      --gw GATEWAY         VPN Gateway (optional)
+  -k, --seed-key KEY       Encryption seed key (optional)
+  -h, --help               Show help message
+```
 
 ### 1. Server Setup (Linux)
 The server acts as the exit node. It needs to forward traffic from the VPN interface (`tun0`) to the internet (`eth0` or `wlan0`).
@@ -114,6 +163,18 @@ sudo ./SAF-LEP -c 1.2.3.4:14578 --ip 10.0.0.2 --gw 10.0.0.1
 ```
 
 #### Windows Client
+
+**⚠️ CRITICAL: TAP Adapter Name Requirements ⚠️**
+The TAP-Windows adapter name **MUST contain only ASCII characters**. Non-ASCII characters (e.g., Cyrillic, Chinese, special symbols) in the adapter name will cause configuration failures because Windows `netsh` commands may not handle encoding properly.
+
+**To rename your TAP adapter:**
+1. Open **Control Panel** → **Network and Sharing Center** → **Change adapter settings**
+2. Find your TAP adapter (usually named "Ethernet 2" or "TAP-Windows Adapter V9")
+3. Right-click → **Rename** → Use only English letters, numbers, spaces, and basic punctuation
+4. Examples of **GOOD** names: `VPN-TAP`, `SAF_LEP_Adapter`, `TAP Adapter 1`
+5. Examples of **BAD** names: `VPN适配器`, `Адаптер`, `VPN⚡Adapter`
+
+**Setup Commands:**
 ```bash
 # 1. Add route to server public IP via local gateway
 # Open Admin PowerShell/CMD
@@ -147,6 +208,11 @@ traceroute 8.8.8.8 # Linux
 ### Windows: "General Failure" on Ping
 - This usually means the TAP adapter is not configured correctly or the route is missing.
 - The application now attempts to force the route to the TAP interface index. Check logs for `Using Interface Index: X`.
+
+### Windows: TAP Adapter Configuration Fails
+- **Check adapter name encoding**: Ensure your TAP adapter has an **ASCII-only** name (see Windows Client Setup section above).
+- **Symptoms**: Application starts but IP configuration fails, or `netsh` commands fail silently.
+- **Solution**: Rename your TAP adapter to contain only English letters, numbers, and basic punctuation.
 
 ### Windows: "Unidentified Network"
 - This is normal for TAP adapters without a default gateway. It does not affect functionality as long as the routes are correct.
