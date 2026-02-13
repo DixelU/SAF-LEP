@@ -21,6 +21,7 @@ find_package(Boost REQUIRED COMPONENTS system)
 set(SOURCES
 	test.cpp
 	udp_tunnel/tunnel.cpp
+	udp_tunnel/auto_setup.cpp
 )
 
 if(WIN32)

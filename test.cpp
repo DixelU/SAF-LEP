@@ -19,30 +19,34 @@
 
 #include "udp_tunnel/tunnel.h"
 #include "udp_tunnel/global_flags.h"
+#include "udp_tunnel/auto_setup.h"
 
 using namespace dixelu::udp;
+using namespace dixelu::udp::autosetup;
 
 void print_usage(const char* program_name)
 {
 	std::cout << "Usage: " << program_name << " [OPTIONS]" << std::endl;
-	std::cout << "Options:" << std::endl;
-	std::cout << "  -p, --port PORT               Local UDP port (default: 0 = auto)" << std::endl;
-	std::cout << "  -c, --connect HOST:PORT       Connect to peer" << std::endl;
+
+	std::cout << "\nQuick start (auto-setup):" << std::endl;
+	std::cout << "  " << program_name << " -s -p PORT -k KEY          # Server (Linux)" << std::endl;
+	std::cout << "  " << program_name << " -c HOST:PORT -k KEY        # Client" << std::endl;
+
+	std::cout << "\nManual mode (legacy):" << std::endl;
+	std::cout << "  " << program_name << " --ip IP -p PORT            # Manual IP config" << std::endl;
+	std::cout << "  " << program_name << " -c HOST:PORT --ip IP --gw GW  # Manual client" << std::endl;
+
+	std::cout << "\nOptions:" << std::endl;
+	std::cout << "  -s, --server                  Server mode (auto-setup NAT, Linux only)" << std::endl;
+	std::cout << "  -c, --connect HOST:PORT       Client mode / connect to peer" << std::endl;
+	std::cout << "  -p, --port PORT               Local UDP port (required for server)" << std::endl;
+	std::cout << "  -k, --seed-key KEY            Encryption seed key (recommended)" << std::endl;
 	std::cout << "  -v, --verbose                 Enable verbose logging" << std::endl;
 	std::cout << "  -w, --watchscreen             Enable live stats watchscreen" << std::endl;
-	std::cout << "      --ip IP                   VPN IP address (e.g. 10.0.0.1)" << std::endl;
+	std::cout << "      --ip IP                   VPN IP address (legacy manual mode)" << std::endl;
 	std::cout << "      --mask MASK               VPN Subnet mask (default: 255.255.255.0)" << std::endl;
-	std::cout << "      --gw GATEWAY              VPN Gateway (optional)" << std::endl;
-	std::cout << "  -k, --seed-key KEY            Encryption seed key (optional)" << std::endl;
+	std::cout << "      --gw GATEWAY              VPN Gateway (legacy manual mode)" << std::endl;
 	std::cout << "  -h, --help                    Show this help message" << std::endl;
-	std::cout << "\nExamples:" << std::endl;
-
-	std::cout << "  " << program_name <<
-		" -p 5000 --ip 10.0.0.1               # Run as server/peer 1" << std::endl;
-	std::cout << "  " << program_name <<
-		" -c 127.0.0.1:5000 --ip 10.0.0.2     # Connect to peer 1" << std::endl;
-	std::cout << "  " << program_name <<
-		" -w -c 127.0.0.1:5000 --ip 10.0.0.2  # With live watchscreen" << std::endl;
 }
 
 // Format bytes to human readable
@@ -227,6 +231,7 @@ int main(int argc, char* argv[])
 	std::string vpn_gw;
 	std::string seed_key;
 	bool watchscreen_mode = false;
+	bool server_mode = false;
 
 	// Parse command line arguments
 	for (int i = 1; i < argc; ++i)
@@ -236,6 +241,10 @@ int main(int argc, char* argv[])
 		{
 			print_usage(argv[0]);
 			return 0;
+		}
+		else if (arg == "-s" || arg == "--server")
+		{
+			server_mode = true;
 		}
 		else if (arg == "-p" || arg == "--port")
 		{
@@ -271,11 +280,106 @@ int main(int argc, char* argv[])
 		}
 	}
 
-	if (vpn_ip.empty())
+	// ---------------------------------------------------------------
+	// Determine run mode
+	// ---------------------------------------------------------------
+	run_mode mode;
+	setup_state auto_state;
+
+	if (!vpn_ip.empty())
 	{
-		std::cerr << "Error: --ip is required" << std::endl;
+		// Legacy mode: --ip was explicitly provided, behave exactly as before
+		mode = run_mode::legacy;
+	}
+	else if (server_mode)
+	{
+		mode = run_mode::server;
+		vpn_ip = "10.0.0.1";
+		vpn_mask = "255.255.255.0";
+		// Gateway stays empty for server
+	}
+	else if (!connect_to.empty())
+	{
+		mode = run_mode::client;
+		vpn_ip = "10.0.0.2";
+		vpn_mask = "255.255.255.0";
+		vpn_gw = "10.0.0.1";
+	}
+	else
+	{
+		std::cerr << "Error: Must specify -s (server), -c HOST:PORT (client), "
+		          << "or --ip (legacy manual mode)" << std::endl;
 		print_usage(argv[0]);
 		return 1;
+	}
+
+	// Validate server mode requirements
+	if (mode == run_mode::server && local_port == 0)
+	{
+		std::cerr << "Error: Server mode requires an explicit port (-p PORT)" << std::endl;
+		return 1;
+	}
+
+	// Warn if no encryption key
+	if (seed_key.empty())
+	{
+		std::cerr << "[Warning] No encryption seed key (-k) provided. "
+		          << "Traffic will NOT be encrypted." << std::endl;
+	}
+
+	// ---------------------------------------------------------------
+	// Parse host:port from -c argument (needed early for DNS resolution)
+	// ---------------------------------------------------------------
+	std::string server_host, server_port;
+	if (!connect_to.empty())
+	{
+		size_t colon_pos = connect_to.find(':');
+		if (colon_pos != std::string::npos)
+		{
+			server_host = connect_to.substr(0, colon_pos);
+			server_port = connect_to.substr(colon_pos + 1);
+		}
+		else
+		{
+			std::cerr << "Error: Invalid format for -c. Use HOST:PORT" << std::endl;
+			return 1;
+		}
+	}
+
+	// ---------------------------------------------------------------
+	// Client auto-mode: resolve DNS BEFORE any VPN setup
+	// ---------------------------------------------------------------
+	if (mode == run_mode::client)
+	{
+		std::cout << "[AutoSetup] Resolving server: " << server_host << "..." << std::endl;
+		auto_state.server_public_ip = resolve_hostname_sync(server_host);
+		if (auto_state.server_public_ip.empty())
+		{
+			std::cerr << "Error: Could not resolve server hostname: " << server_host << std::endl;
+			return 1;
+		}
+		std::cout << "[AutoSetup] Resolved server: " << server_host
+		          << " -> " << auto_state.server_public_ip << std::endl;
+	}
+
+	// ---------------------------------------------------------------
+	// Auto-setup: configure system networking BEFORE starting VPN
+	// ---------------------------------------------------------------
+	if (mode == run_mode::server)
+	{
+		if (!server_setup(auto_state))
+		{
+			std::cerr << "Error: Server auto-setup failed" << std::endl;
+			return 1;
+		}
+	}
+	else if (mode == run_mode::client)
+	{
+		if (!client_setup(auto_state))
+		{
+			std::cerr << "Error: Client auto-setup failed" << std::endl;
+			return 1;
+		}
 	}
 
 	try
@@ -306,57 +410,93 @@ int main(int argc, char* argv[])
 		std::cout << "[VPN] Starting VPN interface on " << vpn_ip << "..." << std::endl;
 		if (!vpn->start(vpn_ip, vpn_mask, vpn_gw))
 		{
-			std::cerr << "Failed to start VPN interface. Make sure you have Administrator privileges (Windows) or root (Linux)." << std::endl;
+			std::cerr << "Failed to start VPN interface. Make sure you have "
+			          << "Administrator privileges (Windows) or root (Linux)." << std::endl;
+			// Teardown auto-setup before exiting
+			if (mode == run_mode::server) server_teardown(auto_state);
+			else if (mode == run_mode::client) client_teardown(auto_state);
 			return 1;
 		}
 
 		// Get local endpoint
 		auto local_ep = tunnel->get_local_endpoint();
-		std::cout << "[Tunnel] Listening on " << local_ep.address().to_string() << ":" << local_ep.port() << std::endl;
+		std::cout << "[Tunnel] Listening on " << local_ep.address().to_string()
+		          << ":" << local_ep.port() << std::endl;
 
 		// Connect to peer if specified
 		if (!connect_to.empty())
 		{
-			std::string host, port;
-			size_t colon_pos = connect_to.find(':');
-			if (colon_pos != std::string::npos)
+			std::cout << "[Tunnel] Connecting to " << server_host << ":" << server_port << "..." << std::endl;
+
+			if (mode == run_mode::client)
 			{
-				host = connect_to.substr(0, colon_pos);
-				port = connect_to.substr(colon_pos + 1);
+				// Use pre-resolved IP directly (skip async DNS)
+				boost::asio::ip::udp::endpoint server_ep(
+					boost::asio::ip::make_address_v4(auto_state.server_public_ip),
+					static_cast<unsigned short>(std::stoi(server_port))
+				);
+				tunnel->connect_to_peer(server_ep);
 			}
 			else
 			{
-				std::cerr << "Error: Invalid format for -c. Use HOST:PORT" << std::endl;
-				return 1;
+				// Legacy mode: use async DNS resolution
+				tunnel->connect_to_peer(server_host, server_port);
 			}
-
-			std::cout << "[Tunnel] Connecting to " << host << ":" << port << "..." << std::endl;
-			tunnel->connect_to_peer(host, port);
 		}
+
+		// -----------------------------------------------------------
+		// Install signal handlers and wait for shutdown
+		// -----------------------------------------------------------
+		std::atomic<bool> shutdown_requested{false};
 
 		if (watchscreen_mode)
 		{
+			std::atomic<bool> watchscreen_running{true};
+			install_signal_handlers([&shutdown_requested, &watchscreen_running]() {
+				shutdown_requested = true;
+				watchscreen_running = false;
+			});
+
 			std::cout << "\n[System] VPN is running with watchscreen. Starting..." << std::endl;
 			std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-			std::atomic<bool> watchscreen_running{true};
 			run_watchscreen(tunnel, watchscreen_running);
 		}
 		else
 		{
-			std::cout << "\n[System] VPN is running. Press Enter to stop..." << std::endl;
-			std::cin.get();
+			install_signal_handlers([&shutdown_requested]() {
+				shutdown_requested = true;
+			});
+
+			std::cout << "\n[System] VPN is running. Press Ctrl+C to stop..." << std::endl;
+			while (!shutdown_requested)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(200));
+			}
 		}
 
-		// Stop everything
+		// -----------------------------------------------------------
+		// Cleanup
+		// -----------------------------------------------------------
+		std::cout << "\n[System] Shutting down..." << std::endl;
+
 		vpn->stop();
 		tunnel->stop();
 
-		std::cout << "[System] Shutting down..." << std::endl;
+		if (mode == run_mode::server)
+			server_teardown(auto_state);
+		else if (mode == run_mode::client)
+			client_teardown(auto_state);
 	}
 	catch (const std::exception& e)
 	{
 		std::cerr << "Error: " << e.what() << std::endl;
+
+		// Best-effort teardown on exception
+		if (mode == run_mode::server)
+			server_teardown(auto_state);
+		else if (mode == run_mode::client)
+			client_teardown(auto_state);
+
 		return 1;
 	}
 
