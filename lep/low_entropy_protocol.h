@@ -333,8 +333,8 @@ constexpr std::vector<uint8_t> put_lep(v0::lep_v0_encoder_state& state, const ui
 
 	encoded_data.push_back(crc);
 	encoded_data.push_back(enc_ground_state);
-	encoded_data.push_back((enc_ground_state ^ index_split[0]) ^ (crc >> 4));
-	encoded_data.push_back((enc_ground_state ^ index_split[1]) ^ (crc + enc_ground_state));
+	encoded_data.push_back((enc_ground_state ^ index_split[0]) + crc);
+	encoded_data.push_back((enc_ground_state ^ index_split[1]) - crc + enc_ground_state);
 	encoded_data.push_back(enc_ground_state ^ index_split[2]);
 	encoded_data.push_back(enc_ground_state ^ index_split[3]);
 
@@ -357,8 +357,8 @@ constexpr v0::lep_decoded_packet get_lep(const uint8_t* data, std::size_t size)
 	uint8_t ground_state = crc ^ enc_ground_state;
 
 	std::uint8_t index_split[] = {
-		static_cast<std::uint8_t>(packet_meta[2] ^ enc_ground_state ^ (crc >>  4)),
-		static_cast<std::uint8_t>(packet_meta[3] ^ enc_ground_state ^ (crc + enc_ground_state)),
+		static_cast<std::uint8_t>((packet_meta[2] - crc) ^ enc_ground_state),
+		static_cast<std::uint8_t>((packet_meta[3] + crc - enc_ground_state) ^ packet_meta[1]),
 		static_cast<std::uint8_t>(packet_meta[4] ^ enc_ground_state),
 		static_cast<std::uint8_t>(packet_meta[5] ^ enc_ground_state)
 	};

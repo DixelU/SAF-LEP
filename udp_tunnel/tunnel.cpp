@@ -474,13 +474,13 @@ void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const 
 	{
 		case encode_scheme::lep_v0:
 		{
-			dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::encode(
+			encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::encode(
 				payload.data(), payload.size(), index);
 			break;
 		}
 		case encode_scheme::lep_v1:
 		{
-			dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v1>::encode(
+			encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v1>::encode(
 				payload.data(), payload.size(), index);
 			break;
 		}
@@ -640,8 +640,22 @@ void p2p_tunnel::send_fragments(peer_connection& peer_conn, uint32_t packet_id, 
 		lep::crypto::transform(encryption_key_, packet_id, payload);
 
 		// Encode with LEP
-		auto encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::encode(
-			payload.data(), payload.size(), packet_id);
+		std::vector<uint8_t> encoded;
+		switch (scheme_)
+		{
+			case encode_scheme::lep_v0:
+			{
+				encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::encode(
+					payload.data(), payload.size(), packet_id);
+				break;
+			}
+			case encode_scheme::lep_v1:
+			{
+				encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v1>::encode(
+					payload.data(), payload.size(), packet_id);
+				break;
+			}
+		}
 
 		if (encoded.empty())
 		{
