@@ -397,7 +397,7 @@ constexpr bool compiletime_encoder_test()
 		values.push_back(__state.fastrand());
 
 	const auto encoded_values = v1::put_lep(__state, values.data(), values.size());
-	const auto decoded_values = get_lep(encoded_values.data(), encoded_values.size());
+	const auto decoded_values = v1::get_lep(encoded_values.data(), encoded_values.size());
 
 	return decoded_values.data == values;
 }
