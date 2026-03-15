@@ -42,6 +42,13 @@ class p2p_tunnel;
 using packet_received_callback = std::function<void(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& from)>;
 using connection_callback = std::function<void(const boost::asio::ip::udp::endpoint& peer)>;
 
+// the data cover up encoding scheme
+enum class encode_scheme
+{
+	lep_v0,
+	lep_v1,
+};
+
 // packet data for long term storage
 struct packet_storage
 {
@@ -152,7 +159,7 @@ struct peer_connection
 class p2p_tunnel : public std::enable_shared_from_this<p2p_tunnel>
 {
 public:
-	explicit p2p_tunnel(uint16_t local_port = 0);
+	explicit p2p_tunnel(uint16_t local_port, encode_scheme scheme);
 	~p2p_tunnel();
 
 	p2p_tunnel(const p2p_tunnel&) = delete;
@@ -219,6 +226,8 @@ private:
 	
 	peer_connection& get_or_create_peer(const boost::asio::ip::udp::endpoint& endpoint);
 	void update_peer_activity(const boost::asio::ip::udp::endpoint& endpoint);
+
+	const encode_scheme scheme_;
 
 	boost::asio::io_context io_context_;
 	boost::asio::ip::udp::socket socket_;

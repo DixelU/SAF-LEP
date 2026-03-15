@@ -156,6 +156,10 @@
     <ClCompile Include="udp_tunnel\tunnel.cpp" />
     <ClCompile Include="udp_tunnel\windows_tap.cpp" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="lep\encryption.h" />
+    <ClInclude Include="lep\low_entropy_protocol.h" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

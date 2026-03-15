@@ -20,10 +20,11 @@ std::string p2p_tunnel::endpoint_to_string(const boost::asio::ip::udp::endpoint&
 	return ep.address().to_string() + ":" + std::to_string(ep.port());
 }
 
-p2p_tunnel::p2p_tunnel(uint16_t local_port)
-	: socket_(io_context_)
-	, resolver_(io_context_)
-	, local_endpoint_(boost::asio::ip::udp::v4(), local_port)
+p2p_tunnel::p2p_tunnel(uint16_t local_port, encode_scheme scheme):
+	scheme_(scheme),
+	socket_(io_context_),
+	resolver_(io_context_),
+	local_endpoint_(boost::asio::ip::udp::v4(), local_port)
 {
 	boost::system::error_code ec;
 	socket_.open(boost::asio::ip::udp::v4(), ec);
@@ -132,8 +133,23 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 	// Decode LEP packet
 	try
 	{
-		auto decoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::decode(
-			receive_buffer_.data(), bytes_transferred);
+		dixelu::lep::packet decoded;
+
+		switch (scheme_)
+		{
+			case encode_scheme::lep_v0:
+			{
+				decoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::decode(
+					receive_buffer_.data(), bytes_transferred);
+				break;
+			}
+			case encode_scheme::lep_v1:
+			{
+				decoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v1>::decode(
+					receive_buffer_.data(), bytes_transferred);
+				break;
+			}
+		}
 
 		// Decrypt after LEP decoding (using packet index from LEP header)
 		lep::crypto::transform(encryption_key_, decoded.index, decoded.data);
@@ -452,9 +468,24 @@ void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const 
 	// Encrypt payload before LEP encoding
 	lep::crypto::transform(encryption_key_, index, payload);
 
-	auto encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::encode(
-		payload.data(), payload.size(), index);
-		
+
+	std::vector<std::uint8_t> encoded;
+	switch (scheme_)
+	{
+		case encode_scheme::lep_v0:
+		{
+			dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v0>::encode(
+				payload.data(), payload.size(), index);
+			break;
+		}
+		case encode_scheme::lep_v1:
+		{
+			dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v1>::encode(
+				payload.data(), payload.size(), index);
+			break;
+		}
+	}
+
 	if (!encoded.empty())
 	{
 		auto buffer = std::make_shared<std::vector<uint8_t>>(std::move(encoded));

@@ -43,6 +43,7 @@ void print_usage(const char* program_name)
 	std::cout << "  -k, --seed-key KEY            Encryption seed key (recommended)" << std::endl;
 	std::cout << "  -v, --verbose                 Enable verbose logging" << std::endl;
 	std::cout << "  -w, --watchscreen             Enable live stats watchscreen" << std::endl;
+	std::cout << "      --lepv1                   Enable experimental LEP::v1 encoder" << std::endl;
 	std::cout << "      --ip IP                   VPN IP address (legacy manual mode)" << std::endl;
 	std::cout << "      --mask MASK               VPN Subnet mask (default: 255.255.255.0)" << std::endl;
 	std::cout << "      --gw GATEWAY              VPN Gateway (legacy manual mode)" << std::endl;
@@ -232,6 +233,7 @@ int main(int argc, char* argv[])
 	std::string seed_key;
 	bool watchscreen_mode = false;
 	bool server_mode = false;
+	encode_scheme encoder = encode_scheme::lep_v0;
 
 	// Parse command line arguments
 	for (int i = 1; i < argc; ++i)
@@ -277,6 +279,10 @@ int main(int argc, char* argv[])
 		else if (arg == "-k" || arg == "--seed-key")
 		{
 			if (i + 1 < argc) seed_key = argv[++i];
+		}
+		else if (arg == "--lepv1")
+		{
+			encoder = encode_scheme::lep_v1;
 		}
 	}
 
@@ -385,7 +391,7 @@ int main(int argc, char* argv[])
 	try
 	{
 		// Create P2P tunnel
-		auto tunnel = std::make_shared<p2p_tunnel>(local_port);
+		auto tunnel = std::make_shared<p2p_tunnel>(local_port, encoder);
 
 		// Set encryption key if provided
 		if (!seed_key.empty())
