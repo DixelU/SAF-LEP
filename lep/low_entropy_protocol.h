@@ -323,10 +323,10 @@ constexpr std::vector<uint8_t> put_lep(v0::lep_v0_encoder_state& state, const ui
 	auto enc_ground_state = crc ^ ground_state;
 
 	std::uint8_t index_split[] = { 
-		state.index & 0xFF,
-		(state.index >> 8) & 0xFF,
-		(state.index >> 16) & 0xFF,
-		(state.index >> 24) & 0xFF
+		static_cast<std::uint8_t>(state.index & 0xFF),
+		static_cast<std::uint8_t>((state.index >> 8) & 0xFF),
+		static_cast<std::uint8_t>((state.index >> 16) & 0xFF),
+		static_cast<std::uint8_t>((state.index >> 24) & 0xFF)
 	};
 
 	encoded_data.push_back(crc);
@@ -354,10 +354,10 @@ constexpr v0::lep_decoded_packet get_lep(const uint8_t* data, std::size_t size)
 	uint8_t ground_state = crc ^ packet_meta[1];
 
 	std::uint8_t index_split[] = {
-		(packet_meta[2] - crc) ^ packet_meta[1],
-		(packet_meta[3] + crc - packet_meta[1]) ^ packet_meta[1],
-		packet_meta[4] ^ packet_meta[1],
-		packet_meta[5] ^ packet_meta[1]
+		static_cast<std::uint8_t>((packet_meta[2] - crc) ^ packet_meta[1]),
+		static_cast<std::uint8_t>((packet_meta[3] + crc - packet_meta[1]) ^ packet_meta[1]),
+		static_cast<std::uint8_t>(packet_meta[4] ^ packet_meta[1]),
+		static_cast<std::uint8_t>(packet_meta[5] ^ packet_meta[1])
 	};
 
 	v0::lep_decoded_packet decoded_packet;
