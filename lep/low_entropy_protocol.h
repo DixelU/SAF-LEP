@@ -329,10 +329,12 @@ constexpr std::vector<uint8_t> put_lep(v0::lep_v0_encoder_state& state, const ui
 		static_cast<std::uint8_t>((state.index >> 24) & 0xFF)
 	};
 
+	state.index++;
+
 	encoded_data.push_back(crc);
 	encoded_data.push_back(enc_ground_state);
-	encoded_data.push_back(enc_ground_state ^ index_split[0] + crc);
-	encoded_data.push_back(enc_ground_state ^ index_split[1] - crc + enc_ground_state);
+	encoded_data.push_back((enc_ground_state ^ index_split[0]) + crc);
+	encoded_data.push_back((enc_ground_state ^ index_split[1]) - crc + enc_ground_state);
 	encoded_data.push_back(enc_ground_state ^ index_split[2]);
 	encoded_data.push_back(enc_ground_state ^ index_split[3]);
 
@@ -351,19 +353,20 @@ constexpr v0::lep_decoded_packet get_lep(const uint8_t* data, std::size_t size)
 	if (crc != packet_meta[0])
 		return {};
 
-	uint8_t ground_state = crc ^ packet_meta[1];
+	uint8_t enc_ground_state = packet_meta[1];
+	uint8_t ground_state = crc ^ enc_ground_state;
 
 	std::uint8_t index_split[] = {
-		static_cast<std::uint8_t>((packet_meta[2] - crc) ^ packet_meta[1]),
-		static_cast<std::uint8_t>((packet_meta[3] + crc - packet_meta[1]) ^ packet_meta[1]),
-		static_cast<std::uint8_t>(packet_meta[4] ^ packet_meta[1]),
-		static_cast<std::uint8_t>(packet_meta[5] ^ packet_meta[1])
+		static_cast<std::uint8_t>((packet_meta[2] - crc) ^ enc_ground_state),
+		static_cast<std::uint8_t>((packet_meta[3] + crc - enc_ground_state) ^ packet_meta[1]),
+		static_cast<std::uint8_t>(packet_meta[4] ^ enc_ground_state),
+		static_cast<std::uint8_t>(packet_meta[5] ^ enc_ground_state)
 	};
 
 	v0::lep_decoded_packet decoded_packet;
 
 	decoded_packet.index = index_split[0] | (index_split[1] << 8);
-	decoded_packet.index |= (index_split[0] << 16) | (index_split[1] << 24);
+	decoded_packet.index |= (index_split[2] << 16) | (index_split[3] << 24);
 
 	uint8_t bit_index = 0;
 	uint8_t buffered_byte = 0;
@@ -388,21 +391,26 @@ constexpr v0::lep_decoded_packet get_lep(const uint8_t* data, std::size_t size)
 	return decoded_packet;
 }
 
-constexpr bool compiletime_encoder_test()
+inline bool compiletime_encoder_test()
 {
 	v0::lep_v0_encoder_state __state{0, 0xAF65423};
 	std::vector<uint8_t> values;
 
 	for (int i = 0; i < 44; i++)
+	{
 		values.push_back(__state.fastrand());
 
-	const auto encoded_values = v1::put_lep(__state, values.data(), values.size());
-	const auto decoded_values = v1::get_lep(encoded_values.data(), encoded_values.size());
+		const auto encoded_values = v1::put_lep(__state, values.data(), values.size());
+		const auto decoded_values = v1::get_lep(encoded_values.data(), encoded_values.size());
 
-	return decoded_values.data == values;
+		if (values != decoded_values.data || __state.index != decoded_values.index + 1)
+			return false;
+	}
+
+	return true;
 }
 
-constexpr bool asdf = compiletime_encoder_test();
+inline bool asdf = compiletime_encoder_test();
 
 } // namespace v1
 
