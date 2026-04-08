@@ -5,6 +5,7 @@
 #include <iostream>
 #include <cstring>
 #include <iomanip>
+#include <limits>
 #include <numeric>
 #include <ranges>
 
@@ -24,6 +25,7 @@ p2p_tunnel::p2p_tunnel(uint16_t local_port, encode_scheme scheme):
 	scheme_(scheme),
 	socket_(io_context_),
 	resolver_(io_context_),
+	maintenance_timer_(io_context_),
 	local_endpoint_(boost::asio::ip::udp::v4(), local_port)
 {
 	boost::system::error_code ec;
@@ -55,6 +57,7 @@ void p2p_tunnel::start()
 		return;
 
 	start_receive();
+	start_maintenance();
 }
 
 void p2p_tunnel::stop()
@@ -65,6 +68,7 @@ void p2p_tunnel::stop()
 	boost::system::error_code ec;
 	socket_.cancel(ec);
 	socket_.close(ec);
+	maintenance_timer_.cancel();
 
 	if (io_thread_.joinable())
 	{
@@ -99,6 +103,17 @@ void p2p_tunnel::start_receive()
 		[this](const boost::system::error_code& error, std::size_t bytes_transferred) {
 			handle_receive(error, bytes_transferred);
 		});
+}
+
+void p2p_tunnel::start_maintenance()
+{
+	if (!running_)
+		return;
+
+	maintenance_timer_.expires_after(std::chrono::seconds(1));
+	maintenance_timer_.async_wait([this](const boost::system::error_code& error) {
+		handle_maintenance(error);
+	});
 }
 
 void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::size_t bytes_transferred)
@@ -181,6 +196,24 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 
 	// Continue receiving
 	start_receive();
+}
+
+void p2p_tunnel::handle_maintenance(const boost::system::error_code& error)
+{
+	if (error)
+		return;
+
+	std::vector<std::shared_ptr<peer_connection>> peers;
+	{
+		std::lock_guard<std::recursive_mutex> lock(peers_mutex_);
+		for (const auto& [_, peer] : peers_)
+			peers.push_back(peer);
+	}
+
+	for (auto& peer : peers)
+		run_peer_maintenance(*peer);
+
+	start_maintenance();
 }
 
 void p2p_tunnel::broadcast(const std::vector<uint8_t>& data)
@@ -543,9 +576,12 @@ void p2p_tunnel::internal_cleanup_procedure(peer_connection& peer)
 
 void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
 {
+	(void)packet_id;
+
 	// NOTE: This function is called with peer.mutex ALREADY LOCKED
 	
 	std::set<uint32_t> late_packets;
+	std::set<uint32_t> lost_packets;
 	auto curr_time = std::chrono::steady_clock::now();
 
 	{
@@ -570,17 +606,43 @@ void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
 
 			auto time_since_start = std::chrono::duration_cast<std::chrono::seconds>(curr_time - iter->second.first_frag_time).count();
 			auto time_since_last_req = std::chrono::duration_cast<std::chrono::seconds>(curr_time - iter->second.last_request_time).count();
+
+			if (time_since_start >= max_reassembly_lifetime_)
+			{
+				lost_packets.insert(pid);
+				continue;
+			}
 			
 			// If it's been long enough since start, AND long enough since last request
 			if (time_since_start >= reassembly_timeout_)
 			{
-				if (time_since_last_req >= 2) // Retry every 2 seconds
+				auto retry_interval = (std::min)(2u << (std::min)(static_cast<unsigned>(iter->second.request_count), 4u), 30u);
+				if (time_since_last_req >= retry_interval)
 				{
 					late_packets.insert(pid);
-					iter->second.last_request_time = curr_time; // Update last request time
+					iter->second.last_request_time = curr_time;
+					if (iter->second.request_count < std::numeric_limits<uint8_t>::max())
+						iter->second.request_count++;
 				}
 			}
 		}
+	}
+
+	for (auto& id : lost_packets)
+	{
+		if (peer.reassembly_buffer.erase(id))
+		{
+			stats_.packets_lost++;
+			stats_.add_event(packet_event_type::lost, id, 0, endpoint_to_string(peer.endpoint));
+			if (VERBOSE_MODE)
+			{
+				std::cout << "[Tunnel] Packet " << id << " timed out locally" << std::endl;
+				stats_.add_log("[Tunnel] Packet " + std::to_string(id) + " timed out locally");
+			}
+		}
+
+		peer.reassembly_in_progress.erase(id);
+		peer.late_reassembly.erase(id);
 	}
 	
 	for (auto& id : late_packets)
@@ -594,6 +656,65 @@ void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
 
 		if (VERBOSE_MODE)
 			std::cout << "[Tunnel] Detected gap, requesting ID: " << id << std::endl;
+	}
+}
+
+void p2p_tunnel::run_peer_maintenance(peer_connection& peer)
+{
+	bool should_probe = false;
+	auto now = std::chrono::steady_clock::now();
+
+	{
+		std::lock_guard<std::mutex> lock(peer.mutex);
+
+		auto silence = std::chrono::duration_cast<std::chrono::seconds>(now - peer.last_seen).count();
+		if (peer.is_connected && silence >= peer_silence_timeout_)
+		{
+			peer.is_connected = false;
+
+			for (const auto& [packet_id, assembly] : peer.reassembly_buffer)
+			{
+				if (assembly.received_frags_count == assembly.total_frags)
+					continue;
+
+				stats_.packets_lost++;
+				stats_.add_event(packet_event_type::lost, packet_id, 0, endpoint_to_string(peer.endpoint));
+			}
+
+			peer.reassembly_buffer.clear();
+			peer.reassembly_in_progress.clear();
+			peer.late_reassembly.clear();
+			peer.storage.clear();
+
+			stats_.add_log("[Tunnel] Peer timed out: " + endpoint_to_string(peer.endpoint));
+		}
+
+		if (!peer.is_connected)
+		{
+			auto since_probe = peer.last_probe_time == std::chrono::steady_clock::time_point{}
+				? reconnect_probe_interval_
+				: std::chrono::duration_cast<std::chrono::seconds>(now - peer.last_probe_time).count();
+
+			if (since_probe >= reconnect_probe_interval_)
+			{
+				peer.last_probe_time = now;
+				should_probe = true;
+			}
+		}
+	}
+
+	if (should_probe)
+	{
+		std::vector<uint8_t> connection_packet = {0x00};
+		send_to_peer_async(connection_packet, peer.endpoint);
+		return;
+	}
+
+	internal_cleanup_procedure(peer);
+
+	{
+		std::lock_guard<std::mutex> lock(peer.mutex);
+		process_packet_gap(peer, peer.last_received_index);
 	}
 }
 
@@ -740,6 +861,7 @@ void p2p_tunnel::connect_to_peer(const boost::asio::ip::udp::endpoint& endpoint)
 		std::lock_guard<std::mutex> locker(peer.mutex);
 		peer.is_connected = true;
 		peer.last_seen = std::chrono::steady_clock::now();
+		peer.last_probe_time = std::chrono::steady_clock::now();
 	}
 
 	// Send a connection packet (empty data to establish connection)

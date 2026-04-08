@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <boost/asio.hpp>
+#include <boost/asio/steady_timer.hpp>
 #include <boost/version.hpp>
 #include <chrono>
 #include <functional>
@@ -135,6 +136,7 @@ struct fragment_assembly
 	std::vector<uint8_t> received_frags_mask;
 	std::chrono::steady_clock::time_point first_frag_time;
 	std::chrono::steady_clock::time_point last_request_time;
+	uint8_t request_count = 0;
 };
 
 // Connection state for a peer
@@ -145,6 +147,7 @@ struct peer_connection
 	uint32_t last_received_index = 0;
 	std::mutex mutex;
 	std::chrono::steady_clock::time_point last_seen = std::chrono::steady_clock::now();
+	std::chrono::steady_clock::time_point last_probe_time = std::chrono::steady_clock::time_point{};
 	std::map<uint32_t, std::vector<packet_storage>> storage;
 
 	// Reassembly state (per peer)
@@ -210,7 +213,9 @@ public:
 
 private:
 	void start_receive();
+	void start_maintenance();
 	void handle_receive(const boost::system::error_code& error, std::size_t bytes_transferred);
+	void handle_maintenance(const boost::system::error_code& error);
 	void handle_send(const boost::system::error_code& error, std::size_t bytes_transferred,
 		std::shared_ptr<std::vector<uint8_t>> buffer, const boost::asio::ip::udp::endpoint& target);
 
@@ -219,6 +224,7 @@ private:
 	void send_control_packet(peer_connection& peer, uint8_t type, const std::vector<uint8_t>& extra_data = {});
 
 	void internal_cleanup_procedure(peer_connection& peer);
+	void run_peer_maintenance(peer_connection& peer);
 	
 	// Refactoring helpers
 	void process_packet_gap(peer_connection& peer, uint32_t packet_id);
@@ -232,6 +238,7 @@ private:
 	boost::asio::io_context io_context_;
 	boost::asio::ip::udp::socket socket_;
 	boost::asio::ip::udp::resolver resolver_;
+	boost::asio::steady_timer maintenance_timer_;
 	boost::asio::ip::udp::endpoint local_endpoint_;
 
 	std::array<uint8_t, 65507> receive_buffer_;
@@ -248,6 +255,9 @@ private:
 
 	std::atomic<uint32_t> next_packet_id_{0};
 	uint32_t reassembly_timeout_{10};
+	uint32_t max_reassembly_lifetime_{45};
+	uint32_t peer_silence_timeout_{15};
+	uint32_t reconnect_probe_interval_{5};
 
 	static constexpr size_t MAX_FRAGMENT_SIZE = 150;
 
