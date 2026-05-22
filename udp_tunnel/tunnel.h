@@ -225,6 +225,7 @@ private:
 
 	void internal_cleanup_procedure(peer_connection& peer);
 	void run_peer_maintenance(peer_connection& peer);
+	void reset_peer_session_locked(peer_connection& peer);
 	
 	// Refactoring helpers
 	void process_packet_gap(peer_connection& peer, uint32_t packet_id);

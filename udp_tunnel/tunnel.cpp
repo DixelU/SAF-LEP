@@ -366,6 +366,9 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 		// Call callback outside lock
 		if (!completed_packet.empty())
 		{
+			if (completed_packet.size() == 1 && completed_packet[0] == 0x00)
+				return;
+
 			stats_.packets_received++;
 			stats_.add_event(packet_event_type::received, packet_id, completed_packet.size(), endpoint_to_string(remote_endpoint_));
 
@@ -449,10 +452,7 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 
 			uint32_t req_id = get_u32(decoded.data, 1);
 			auto iter = peer.storage.upper_bound(req_id);
-			if (iter == peer.storage.end())
-				return;
-
-			peer.storage.erase(peer.storage.begin(), iter);
+			peer.storage.erase(peer.storage.begin(), iter == peer.storage.end() ? peer.storage.end() : iter);
 
 			break;
 		}
@@ -531,17 +531,41 @@ void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const 
 	}
 }
 
+void p2p_tunnel::reset_peer_session_locked(peer_connection& peer)
+{
+	for (const auto& [packet_id, assembly] : peer.reassembly_buffer)
+	{
+		if (assembly.received_frags_count == assembly.total_frags)
+			continue;
+
+		stats_.packets_lost++;
+		stats_.add_event(packet_event_type::lost, packet_id, 0, endpoint_to_string(peer.endpoint));
+	}
+
+	peer.next_send_index = 0;
+	peer.last_received_index = 0;
+	peer.reassembly_buffer.clear();
+	peer.reassembly_in_progress.clear();
+	peer.late_reassembly.clear();
+	peer.storage.clear();
+}
+
 void p2p_tunnel::internal_cleanup_procedure(peer_connection& peer)
 {
 	auto curr = std::chrono::steady_clock::now();
-
-	constexpr auto N = 5;
-	uint32_t ids[N]{};
-	uint8_t size = 0;
+	std::vector<uint32_t> ids_to_erase;
+	uint32_t ack_max = 0;
+	bool has_ack = false;
 
 	std::lock_guard<std::mutex> lock(peer.mutex);
 
-	// remove all packets that have all request results satified and for which RRQs wont be sent again
+	uint32_t lowest_pending = std::numeric_limits<uint32_t>::max();
+	for (auto id : peer.reassembly_in_progress)
+		lowest_pending = (std::min)(lowest_pending, id);
+	for (auto id : peer.late_reassembly)
+		lowest_pending = (std::min)(lowest_pending, id);
+
+	// Only acknowledge a safe prefix below the lowest still-pending packet.
 	for (auto& [id, data] : peer.reassembly_buffer)
 	{
 		if (data.received_frags_count != data.total_frags)
@@ -555,23 +579,29 @@ void p2p_tunnel::internal_cleanup_procedure(peer_connection& peer)
 		if (peer.reassembly_in_progress.contains(id) || peer.late_reassembly.contains(id))
 			continue;
 
-		ids[size++] = id;
-		if (size == N)
-			break;
+		if (lowest_pending != std::numeric_limits<uint32_t>::max() && id >= lowest_pending)
+			continue;
+
+		ids_to_erase.push_back(id);
+		if (!has_ack || id > ack_max)
+		{
+			ack_max = id;
+			has_ack = true;
+		}
 	}
 
-	if (size > 0)
+	if (has_ack)
 	{
 		std::vector<uint8_t> req_data;
-		req_data.push_back((*ids >> 24) & 0xFF);
-		req_data.push_back((*ids >> 16) & 0xFF);
-		req_data.push_back((*ids >> 8) & 0xFF);
-		req_data.push_back(*ids & 0xFF);
+		req_data.push_back((ack_max >> 24) & 0xFF);
+		req_data.push_back((ack_max >> 16) & 0xFF);
+		req_data.push_back((ack_max >> 8) & 0xFF);
+		req_data.push_back(ack_max & 0xFF);
 		send_control_packet(peer, PAC_LTR, req_data);
 	}
 
-	while (size-- > 0)
-		peer.reassembly_buffer.erase(ids[size]);
+	for (auto id : ids_to_erase)
+		peer.reassembly_buffer.erase(id);
 }
 
 void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
@@ -671,20 +701,7 @@ void p2p_tunnel::run_peer_maintenance(peer_connection& peer)
 		if (peer.is_connected && silence >= peer_silence_timeout_)
 		{
 			peer.is_connected = false;
-
-			for (const auto& [packet_id, assembly] : peer.reassembly_buffer)
-			{
-				if (assembly.received_frags_count == assembly.total_frags)
-					continue;
-
-				stats_.packets_lost++;
-				stats_.add_event(packet_event_type::lost, packet_id, 0, endpoint_to_string(peer.endpoint));
-			}
-
-			peer.reassembly_buffer.clear();
-			peer.reassembly_in_progress.clear();
-			peer.late_reassembly.clear();
-			peer.storage.clear();
+			reset_peer_session_locked(peer);
 
 			stats_.add_log("[Tunnel] Peer timed out: " + endpoint_to_string(peer.endpoint));
 		}
@@ -859,6 +876,7 @@ void p2p_tunnel::connect_to_peer(const boost::asio::ip::udp::endpoint& endpoint)
 	auto& peer = get_or_create_peer(endpoint);
 	{
 		std::lock_guard<std::mutex> locker(peer.mutex);
+		reset_peer_session_locked(peer);
 		peer.is_connected = true;
 		peer.last_seen = std::chrono::steady_clock::now();
 		peer.last_probe_time = std::chrono::steady_clock::now();
@@ -956,7 +974,10 @@ void p2p_tunnel::update_peer_activity(const boost::asio::ip::udp::endpoint& endp
 	peer.last_seen = std::chrono::steady_clock::now();
 	if (!peer.is_connected)
 	{
+		reset_peer_session_locked(peer);
 		peer.is_connected = true;
+		peer.last_probe_time = std::chrono::steady_clock::time_point{};
+		stats_.add_log("[Tunnel] Peer session reset: " + endpoint_to_string(endpoint));
 	}
 }
 
