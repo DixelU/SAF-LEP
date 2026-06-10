@@ -303,9 +303,10 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 		{
 			std::lock_guard<std::mutex> lock(peer.mutex);
 
-			// Gap detection
-			process_packet_gap(peer, packet_id);
-			
+			// Gap detection runs from the 1s maintenance sweep (run_peer_maintenance),
+			// not here: every threshold in process_packet_gap is measured in seconds,
+			// so per-fragment invocation gave no benefit and, now that the sweep is
+			// uncapped, would cost O(n) per arriving fragment.
 			if (packet_id > peer.last_received_index)
 				peer.last_received_index = packet_id;
 
@@ -617,11 +618,14 @@ void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
 	{
 		// No need for reassembly_mutex_ anymore, everything is in peer
 		
-		auto packets = peer.reassembly_in_progress | std::views::take(10) | std::ranges::to<std::vector>();
-		auto late_packets_view = peer.late_reassembly | std::views::take(10);
-		for (auto& el : late_packets_view)
-			packets.push_back(el);
-		// Gather candidates: top 10 from progress + top 10 from late
+		// Process the FULL set of pending reassemblies, not just a prefix.
+		// Capping this at 10 starved both re-request and timeout cleanup under
+		// sustained loss: reassembly_in_progress grew faster than 10/tick could
+		// drain it, so the backlog (and the stuck re-request loop) persisted until
+		// a manual restart. Per-packet backoff in the loop below still rate-limits
+		// the actual RRQs, so iterating everything here is safe.
+		auto packets = peer.reassembly_in_progress | std::ranges::to<std::vector>();
+		packets.insert(packets.end(), peer.late_reassembly.begin(), peer.late_reassembly.end());
 
 		for (auto& pid: packets)
 		{
