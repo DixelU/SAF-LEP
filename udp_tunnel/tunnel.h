@@ -239,6 +239,8 @@ private:
 	void handle_fragmentation(peer_connection& peer, dixelu::lep::packet& decoded);
 	void handle_control_packet(peer_connection& peer, dixelu::lep::packet& decoded);
 	void send_control_packet(peer_connection& peer, uint8_t type, const std::vector<uint8_t>& extra_data = {});
+	void send_raw_control(peer_connection& peer, std::vector<uint8_t> payload);
+	void handle_long_control_packet(peer_connection& peer, dixelu::lep::packet& decoded);
 
 	void internal_cleanup_procedure(peer_connection& peer);
 	void run_peer_maintenance(peer_connection& peer);

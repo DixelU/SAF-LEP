@@ -329,6 +329,13 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 		if (decoded.data.size() >= 1)
 			handle_control_packet(peer, decoded);
 	}
+	else if (decoded.data[5] == 0)
+	{
+		// Long-form control packet. A real data fragment always carries total_frags >= 1,
+		// so a zero at offset 5 unambiguously marks an extended control message (such as
+		// a fragment-level RRQ) and never collides with the data path below.
+		handle_long_control_packet(peer, decoded);
+	}
 	else
 	{
 		uint32_t packet_id = get_u32(decoded.data, 0);
@@ -522,6 +529,66 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 	}
 }
 
+void p2p_tunnel::handle_long_control_packet(peer_connection& peer, dixelu::lep::packet& decoded)
+{
+	// Long-control framing: [packet_id:4][sub_type:1][0x00 marker:1][payload...].
+	// Reached from handle_fragmentation when byte[5] == 0, which a real data fragment
+	// can never be, so an arbitrary-length control message is safe here.
+	if (decoded.data.size() < 7)
+		return;
+
+	uint8_t sub_type = decoded.data[4];
+
+	switch (sub_type)
+	{
+		case PAC_RRQ:
+		{
+			// Fragment-level re-request: resend only the listed fragment indices instead
+			// of the whole packet, so a single lost fragment costs a single retransmit.
+			uint32_t req_id = get_u32(decoded.data, 0);
+			stats_.retransmit_requests++;
+			stats_.add_event(packet_event_type::retransmit_requested, req_id, 0, endpoint_to_string(peer.endpoint));
+
+			if (VERBOSE_MODE)
+			{
+				std::cout << "[Tunnel] Received fragment RRQ for packet " << req_id
+				          << " (" << (decoded.data.size() - 6) << " frags)" << std::endl;
+				stats_.add_log("[Tunnel] Frag RRQ for packet " + std::to_string(req_id));
+			}
+
+			std::lock_guard<std::mutex> lock(peer.mutex);
+			auto it = peer.storage.find(req_id);
+			if (it == peer.storage.end())
+			{
+				std::vector<uint8_t> id_bytes(decoded.data.begin(), decoded.data.begin() + 4);
+				send_control_packet(peer, PAC_LST, id_bytes);
+				return;
+			}
+
+			stats_.add_event(packet_event_type::retransmitted, req_id, 0, endpoint_to_string(peer.endpoint));
+			for (size_t i = 6; i < decoded.data.size(); ++i)
+			{
+				uint8_t frag = decoded.data[i];
+				if (frag >= it->second.size())
+					continue;
+
+				auto buffer = std::make_shared<std::vector<uint8_t>>(it->second[frag].data);
+				socket_.async_send_to(
+					boost::asio::buffer(*buffer),
+					peer.endpoint,
+					[this, buffer, endpoint = peer.endpoint](const boost::system::error_code& error, std::size_t bytes_transferred)
+				{
+					handle_send(error, bytes_transferred, buffer, endpoint);
+				});
+			}
+
+			break;
+		}
+		default:
+			break;
+	}
+}
+
 void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const std::vector<uint8_t>& extra_data)
 {
 	std::vector<uint8_t> payload;
@@ -529,18 +596,20 @@ void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const 
 	payload.push_back(type);
 	payload.insert(payload.end(), extra_data.begin(), extra_data.end());
 
-	// Encode with next index
-	uint32_t index;
-	{
-		// Assumes peer.mutex is ALREADY LOCKED by the caller
-		// std::lock_guard<std::mutex> lock(peer.mutex);
-		// Control packets consume an index sequence to keep LEP encryption synchronized
-		index = peer.next_send_index++;
-	}
+	send_raw_control(peer, std::move(payload));
+}
+
+void p2p_tunnel::send_raw_control(peer_connection& peer, std::vector<uint8_t> payload)
+{
+	// Assumes peer.mutex is ALREADY LOCKED by the caller. Control packets consume an
+	// index sequence to keep LEP encryption synchronized. Unlike send_control_packet,
+	// the payload is sent verbatim (no leading type byte prepended), so callers can
+	// place the long-control marker (byte[5] == 0) exactly where the receiver's
+	// data/control dispatch expects it.
+	uint32_t index = peer.next_send_index++;
 
 	// Encrypt payload before LEP encoding
 	lep::crypto::transform(encryption_key_, index, payload);
-
 
 	std::vector<std::uint8_t> encoded;
 	switch (scheme_)
@@ -720,15 +789,46 @@ void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
 	
 	for (auto& id : late_packets)
 	{
-		std::vector<uint8_t> req_data;
-		req_data.push_back((id >> 24) & 0xFF);
-		req_data.push_back((id >> 16) & 0xFF);
-		req_data.push_back((id >> 8) & 0xFF);
-		req_data.push_back(id & 0xFF);
-		send_control_packet(peer, PAC_RRQ, req_data);
+		std::vector<uint8_t> id_bytes;
+		id_bytes.push_back((id >> 24) & 0xFF);
+		id_bytes.push_back((id >> 16) & 0xFF);
+		id_bytes.push_back((id >> 8) & 0xFF);
+		id_bytes.push_back(id & 0xFF);
+
+		// Enumerate the fragments we are actually missing. The mask is right here, so a
+		// single hole no longer drags the whole packet back across the wire.
+		std::vector<uint8_t> missing;
+		auto it = peer.reassembly_buffer.find(id);
+		if (it != peer.reassembly_buffer.end())
+		{
+			const auto& mask = it->second.received_frags_mask;
+			for (size_t f = 0; f < mask.size(); ++f)
+				if (!mask[f])
+					missing.push_back(static_cast<uint8_t>(f));
+
+			// Past half-missing, listing every index costs more than just resending all.
+			if (missing.size() > mask.size() / 2)
+				missing.clear();
+		}
+
+		if (!missing.empty())
+		{
+			// Fragment RRQ: [id:4][PAC_RRQ][0x00 marker][missing frags...]
+			std::vector<uint8_t> payload = id_bytes;
+			payload.push_back(PAC_RRQ);
+			payload.push_back(0x00);
+			payload.insert(payload.end(), missing.begin(), missing.end());
+			send_raw_control(peer, std::move(payload));
+		}
+		else
+		{
+			// Whole-packet RRQ (legacy 5-byte form): resend everything.
+			send_control_packet(peer, PAC_RRQ, id_bytes);
+		}
 
 		if (VERBOSE_MODE)
-			std::cout << "[Tunnel] Detected gap, requesting ID: " << id << std::endl;
+			std::cout << "[Tunnel] Detected gap, requesting ID: " << id
+			          << " (" << (missing.empty() ? std::string("all") : std::to_string(missing.size()) + " frags") << ")" << std::endl;
 	}
 }
 
