@@ -89,6 +89,14 @@ struct tunnel_stats
 	std::atomic<uint64_t> packets_lost{0};
 	std::atomic<uint64_t> retransmit_requests{0};
 
+	// Diagnostics for the "8 MB/s on the wire, ~nothing on the socket" gap.
+	// tap_bytes_in/out are measured at the TAP/TUN boundary (vpn_interface), which
+	// the UDP socket counters above never see; broadcast_drops counts packets read
+	// from the adapter that were discarded because no peer was connected.
+	std::atomic<uint64_t> tap_bytes_in{0};
+	std::atomic<uint64_t> tap_bytes_out{0};
+	std::atomic<uint64_t> broadcast_drops{0};
+
 	mutable std::mutex events_mutex;
 	std::deque<packet_event> recent_events;
 	static constexpr size_t MAX_EVENTS = 10;
@@ -156,6 +164,11 @@ struct peer_connection
 	std::set<uint32_t> late_reassembly;
 
 	bool is_connected = false;
+	// True for explicitly configured targets (connect_to_peer). Persistent peers
+	// keep probing to reconnect and are never evicted; learned peers (discovered
+	// from inbound datagrams) are evicted once silent so a NAT rebind or stray
+	// packet cannot leave an immortal entry that re-probes forever.
+	bool persistent = false;
 };
 
 // P2P Tunnel class - handles UDP communication with LEP encoding
@@ -198,6 +211,10 @@ public:
 
 	// Get connected peers
 	std::vector<boost::asio::ip::udp::endpoint> get_connected_peers() const;
+
+	// Total peer_connection entries (connected + lingering). A gap between this and
+	// the connected count reveals zombie/rebind churn.
+	size_t get_peer_count() const;
 
 	// Check if peer is connected
 	bool is_peer_connected(const boost::asio::ip::udp::endpoint& peer) const;
@@ -259,6 +276,7 @@ private:
 	uint32_t max_reassembly_lifetime_{45};
 	uint32_t peer_silence_timeout_{15};
 	uint32_t reconnect_probe_interval_{5};
+	uint32_t peer_eviction_timeout_{60}; // drop silent, non-persistent peers after this many seconds
 
 	static constexpr size_t MAX_FRAGMENT_SIZE = 150;
 

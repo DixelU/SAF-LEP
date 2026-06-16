@@ -8,6 +8,9 @@
 #include <atomic>
 
 #ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
 #include <conio.h>
 #else
 #include <termios.h>
@@ -108,9 +111,19 @@ bool key_pressed()
 #endif
 }
 
+// When true, clear via ANSI escapes instead of spawning a process. Set in main()
+// once the Windows VT terminal is enabled. The old system("cls") spawned cmd.exe
+// twice a second — tens of thousands of processes over a multi-hour session.
+static bool g_use_ansi_clear = false;
+
 // Clear screen
 void clear_screen()
 {
+	if (g_use_ansi_clear)
+	{
+		std::cout << "\033[2J\033[H";
+		return;
+	}
 #ifdef _WIN32
 	system("cls");
 #else
@@ -123,6 +136,8 @@ void run_watchscreen(std::shared_ptr<p2p_tunnel> tunnel, std::atomic<bool>& runn
 {
 	uint64_t last_bytes_sent = 0;
 	uint64_t last_bytes_received = 0;
+	uint64_t last_tap_in = 0;
+	uint64_t last_tap_out = 0;
 	auto last_time = std::chrono::steady_clock::now();
 
 	while (running)
@@ -146,13 +161,19 @@ void run_watchscreen(std::shared_ptr<p2p_tunnel> tunnel, std::atomic<bool>& runn
 		// Calculate throughput
 		uint64_t curr_sent = stats.bytes_sent.load();
 		uint64_t curr_recv = stats.bytes_received.load();
+		uint64_t curr_tap_in = stats.tap_bytes_in.load();
+		uint64_t curr_tap_out = stats.tap_bytes_out.load();
 
 		double elapsed_sec = elapsed_ms / 1000.0;
 		uint64_t send_rate = static_cast<uint64_t>((curr_sent - last_bytes_sent) / elapsed_sec);
 		uint64_t recv_rate = static_cast<uint64_t>((curr_recv - last_bytes_received) / elapsed_sec);
+		uint64_t tap_in_rate = static_cast<uint64_t>((curr_tap_in - last_tap_in) / elapsed_sec);
+		uint64_t tap_out_rate = static_cast<uint64_t>((curr_tap_out - last_tap_out) / elapsed_sec);
 
 		last_bytes_sent = curr_sent;
 		last_bytes_received = curr_recv;
+		last_tap_in = curr_tap_in;
+		last_tap_out = curr_tap_out;
 		last_time = now;
 
 		// Clear and redraw
@@ -164,7 +185,7 @@ void run_watchscreen(std::shared_ptr<p2p_tunnel> tunnel, std::atomic<bool>& runn
 
 		// Connection info
 		auto peers = tunnel->get_connected_peers();
-		std::cout << "[ Peers: " << peers.size() << " ]" << std::endl;
+		std::cout << "[ Peers: " << peers.size() << " connected / " << tunnel->get_peer_count() << " total ]" << std::endl;
 		for (const auto& peer : peers)
 		{
 			std::cout << "  - " << peer.address().to_string() << ":" << peer.port() << std::endl;
@@ -177,6 +198,17 @@ void run_watchscreen(std::shared_ptr<p2p_tunnel> tunnel, std::atomic<bool>& runn
 		          << "  (total: " << format_bytes(curr_sent) << ")" << std::endl;
 		std::cout << "  RX: " << std::setw(12) << format_throughput(recv_rate)
 		          << "  (total: " << format_bytes(curr_recv) << ")" << std::endl;
+		std::cout << std::endl;
+
+		// Adapter-boundary throughput. If these dwarf the socket TX/RX above, the
+		// flood is looping at the TAP/TUN and never reaching the UDP socket — which
+		// is exactly the "8 MB/s on the NIC, ~nothing on the app meter" signature.
+		std::cout << "[ TAP/TUN boundary ]" << std::endl;
+		std::cout << "  In : " << std::setw(12) << format_throughput(tap_in_rate)
+		          << "  (total: " << format_bytes(curr_tap_in) << ")" << std::endl;
+		std::cout << "  Out: " << std::setw(12) << format_throughput(tap_out_rate)
+		          << "  (total: " << format_bytes(curr_tap_out) << ")" << std::endl;
+		std::cout << "  Broadcast drops (no peer): " << stats.broadcast_drops.load() << std::endl;
 		std::cout << std::endl;
 
 		// Stats summary
@@ -225,6 +257,17 @@ void run_watchscreen(std::shared_ptr<p2p_tunnel> tunnel, std::atomic<bool>& runn
 
 int main(int argc, char* argv[])
 {
+#ifdef _WIN32
+	{
+		HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+		DWORD console_mode = 0;
+		if (h_out != INVALID_HANDLE_VALUE && GetConsoleMode(h_out, &console_mode))
+			g_use_ansi_clear = SetConsoleMode(h_out, console_mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0;
+	}
+#else
+	g_use_ansi_clear = true;
+#endif
+
 	uint16_t local_port = 0;
 	std::string connect_to;
 	std::string vpn_ip;
@@ -474,9 +517,42 @@ int main(int argc, char* argv[])
 			});
 
 			std::cout << "\n[System] VPN is running. Press Ctrl+C to stop..." << std::endl;
+			std::cout << "[System] Periodic stats every 5s (redirect stdout to a file for a long run)." << std::endl;
+
+			auto start_time = std::chrono::steady_clock::now();
+			auto last_stat = start_time;
+			uint64_t l_tx = 0, l_rx = 0, l_ti = 0, l_to = 0;
 			while (!shutdown_requested)
 			{
 				std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+				auto now = std::chrono::steady_clock::now();
+				auto since_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_stat).count();
+				if (since_ms < 5000)
+					continue;
+
+				auto& s = tunnel->get_stats();
+				uint64_t tx = s.bytes_sent.load();
+				uint64_t rx = s.bytes_received.load();
+				uint64_t ti = s.tap_bytes_in.load();
+				uint64_t to = s.tap_bytes_out.load();
+				double dt = since_ms / 1000.0;
+				auto uptime = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
+
+				// A large tap_in with a tiny sock_tx (and climbing drops) localizes the
+				// flood to the adapter loop; if sock_tx tracks the NIC, it's the socket.
+				std::cout << "[Stats +" << uptime << "s] "
+				          << "sock_tx=" << format_throughput(static_cast<uint64_t>((tx - l_tx) / dt))
+				          << " sock_rx=" << format_throughput(static_cast<uint64_t>((rx - l_rx) / dt))
+				          << " | tap_in=" << format_throughput(static_cast<uint64_t>((ti - l_ti) / dt))
+				          << " tap_out=" << format_throughput(static_cast<uint64_t>((to - l_to) / dt))
+				          << " | drops=" << s.broadcast_drops.load()
+				          << " peers=" << tunnel->get_connected_peers().size()
+				          << "/" << tunnel->get_peer_count()
+				          << std::endl;
+
+				l_tx = tx; l_rx = rx; l_ti = ti; l_to = to;
+				last_stat = now;
 			}
 		}
 

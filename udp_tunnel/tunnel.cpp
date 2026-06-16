@@ -213,6 +213,36 @@ void p2p_tunnel::handle_maintenance(const boost::system::error_code& error)
 	for (auto& peer : peers)
 		run_peer_maintenance(*peer);
 
+	// Evict stale learned peers. Every NAT rebind or stray datagram creates a
+	// peer_connection; without eviction these linger forever and run_peer_maintenance
+	// re-probes each one every reconnect_probe_interval_ seconds indefinitely, so
+	// peers_ grows without bound and the probe traffic climbs over a long session.
+	// Persistent peers (explicit connect_to_peer targets) are kept so the client
+	// keeps trying to reach its configured server.
+	{
+		auto now = std::chrono::steady_clock::now();
+		std::lock_guard<std::recursive_mutex> lock(peers_mutex_);
+		for (auto it = peers_.begin(); it != peers_.end(); )
+		{
+			auto& peer = *it->second;
+			bool evict = false;
+			{
+				std::lock_guard<std::mutex> plock(peer.mutex);
+				auto silence = std::chrono::duration_cast<std::chrono::seconds>(now - peer.last_seen).count();
+				evict = !peer.persistent && !peer.is_connected &&
+					silence >= peer_eviction_timeout_;
+			}
+
+			if (evict)
+			{
+				stats_.add_log("[Tunnel] Evicting stale peer: " + endpoint_to_string(it->second->endpoint));
+				it = peers_.erase(it);
+			}
+			else
+				++it;
+		}
+	}
+
 	start_maintenance();
 }
 
@@ -225,6 +255,15 @@ void p2p_tunnel::broadcast(const std::vector<uint8_t>& data)
 	// Actually send_to_peer_async is thread safe for global peers map access, 
 	// but we need a snapshot of connected peers.
 	auto connected_peers = get_connected_peers();
+	if (connected_peers.empty())
+	{
+		// Nothing to send to: the OS is still feeding us packets off the adapter
+		// (full-tunnel routes point at TAP), so a rising drop count while the link
+		// is flapping points the finger at an adapter-side loop, not the socket.
+		stats_.broadcast_drops++;
+		return;
+	}
+
 	for (const auto& peer : connected_peers)
 		send_to_peer_async(data, peer);
 }
@@ -881,6 +920,7 @@ void p2p_tunnel::connect_to_peer(const boost::asio::ip::udp::endpoint& endpoint)
 	{
 		std::lock_guard<std::mutex> locker(peer.mutex);
 		reset_peer_session_locked(peer);
+		peer.persistent = true;
 		peer.is_connected = true;
 		peer.last_seen = std::chrono::steady_clock::now();
 		peer.last_probe_time = std::chrono::steady_clock::now();
@@ -945,6 +985,12 @@ std::vector<boost::asio::ip::udp::endpoint> p2p_tunnel::get_connected_peers() co
 	}
 
 	return result;
+}
+
+size_t p2p_tunnel::get_peer_count() const
+{
+	std::lock_guard<std::recursive_mutex> lock(peers_mutex_);
+	return peers_.size();
 }
 
 bool p2p_tunnel::is_peer_connected(const boost::asio::ip::udp::endpoint& peer) const
@@ -1124,6 +1170,7 @@ void vpn_interface::read_from_tap()
 		auto packet = tap_adapter_->read();
 		if (!packet.empty())
 		{
+			tunnel_->get_stats().tap_bytes_in += packet.size();
 			// Windows TAP returns Ethernet frames. We need to strip the header for the tunnel (Layer 3).
 			// Ethernet header is 14 bytes: [Dest MAC(6)][Src MAC(6)][EtherType(2)]
 			if (packet.size() > 14)
@@ -1157,6 +1204,7 @@ void vpn_interface::read_from_tap()
 		auto packet = tun_adapter_->read();
 		if (!packet.empty())
 		{
+			tunnel_->get_stats().tap_bytes_in += packet.size();
 			// Broadcast to all peers (simple hub mode)
 			tunnel_->broadcast(packet);
 		}
@@ -1271,6 +1319,8 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 {
 	if (!running_)
 		return;
+
+	tunnel_->get_stats().tap_bytes_out += data.size();
 
 	// Filter out control packets or too small packets (min IPv4 header is 20 bytes)
 	if (data.size() < 20)
