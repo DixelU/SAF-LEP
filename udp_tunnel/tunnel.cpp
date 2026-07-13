@@ -1132,7 +1132,7 @@ void p2p_tunnel::update_peer_activity(const boost::asio::ip::udp::endpoint& endp
 }
 
 // VPN Interface Implementation
-vpn_interface::vpn_interface(std::shared_ptr<p2p_tunnel> tunnel)
+vpn_interface::vpn_interface(std::shared_ptr<tunnel_interface> tunnel)
 	: tunnel_(std::move(tunnel))
 #ifdef _WIN32
 	, tap_adapter_(std::make_unique<TapAdapter>())

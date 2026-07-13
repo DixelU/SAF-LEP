@@ -171,19 +171,35 @@ struct peer_connection
 	bool persistent = false;
 };
 
+// Base interface for all tunnel implementations
+class tunnel_interface
+{
+public:
+	virtual ~tunnel_interface() = default;
+	virtual void start() = 0;
+	virtual void stop() = 0;
+	virtual void broadcast(const std::vector<uint8_t>& data) = 0;
+	virtual void set_packet_received_callback(packet_received_callback cb) = 0;
+	virtual tunnel_stats& get_stats() = 0;
+	virtual const tunnel_stats& get_stats() const = 0;
+	virtual void set_encryption_key(const std::string& key) = 0;
+	virtual std::vector<boost::asio::ip::udp::endpoint> get_connected_peers() const = 0;
+	virtual size_t get_peer_count() const = 0;
+};
+
 // P2P Tunnel class - handles UDP communication with LEP encoding
-class p2p_tunnel : public std::enable_shared_from_this<p2p_tunnel>
+class p2p_tunnel : public tunnel_interface, public std::enable_shared_from_this<p2p_tunnel>
 {
 public:
 	explicit p2p_tunnel(uint16_t local_port, encode_scheme scheme);
-	~p2p_tunnel();
+	~p2p_tunnel() override;
 
 	p2p_tunnel(const p2p_tunnel&) = delete;
 	p2p_tunnel& operator=(const p2p_tunnel&) = delete;
 
 	// Start the tunnel (async operations)
-	void start();
-	void stop();
+	void start() override;
+	void stop() override;
 
 	// Run the IO context (blocking)
 	void run();
@@ -193,7 +209,7 @@ public:
 	void send_to_peer_async(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& peer);
 
 	// Broadcast to all connected peers
-	void broadcast(const std::vector<uint8_t>& data);
+	void broadcast(const std::vector<uint8_t>& data) override;
 
 	// Connect to a peer (for P2P establishment)
 	void connect_to_peer(const std::string& address, const std::string& port);
@@ -203,25 +219,25 @@ public:
 	boost::asio::ip::udp::endpoint get_local_endpoint() const;
 
 	// Set callbacks
-	void set_packet_received_callback(packet_received_callback cb);
+	void set_packet_received_callback(packet_received_callback cb) override;
 	void set_connection_callback(connection_callback cb);
 
 	// Set encryption key from seed string
-	void set_encryption_key(const std::string& seed_key);
+	void set_encryption_key(const std::string& seed_key) override;
 
 	// Get connected peers
-	std::vector<boost::asio::ip::udp::endpoint> get_connected_peers() const;
+	std::vector<boost::asio::ip::udp::endpoint> get_connected_peers() const override;
 
 	// Total peer_connection entries (connected + lingering). A gap between this and
 	// the connected count reveals zombie/rebind churn.
-	size_t get_peer_count() const;
+	size_t get_peer_count() const override;
 
 	// Check if peer is connected
 	bool is_peer_connected(const boost::asio::ip::udp::endpoint& peer) const;
 
 	// Get statistics for watchscreen
-	tunnel_stats& get_stats() { return stats_; }
-	const tunnel_stats& get_stats() const { return stats_; }
+	tunnel_stats& get_stats() override { return stats_; }
+	const tunnel_stats& get_stats() const override { return stats_; }
 
 	static constexpr uint8_t PAC_RRQ = 19; // packet re-request
 	static constexpr uint8_t PAC_LTR = 37; // packet less-than (that index was) recieved
@@ -295,7 +311,7 @@ private:
 class vpn_interface
 {
 public:
-	explicit vpn_interface(std::shared_ptr<p2p_tunnel> tunnel);
+	explicit vpn_interface(std::shared_ptr<tunnel_interface> tunnel);
 	~vpn_interface();
 
 	// Start the VPN interface (desktop platforms)
@@ -311,7 +327,7 @@ public:
 	void stop();
 
 private:
-	std::shared_ptr<p2p_tunnel> tunnel_;
+	std::shared_ptr<tunnel_interface> tunnel_;
 #ifdef _WIN32
 	std::unique_ptr<TapAdapter> tap_adapter_;
 	boost::asio::ip::address_v4 local_ip_;

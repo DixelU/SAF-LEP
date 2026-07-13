@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <sstream>
 #include <atomic>
+#include <cstdlib>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -21,6 +22,7 @@
 #include "lep/low_entropy_protocol.h"
 
 #include "udp_tunnel/tunnel.h"
+#include "udp_tunnel/maxcalls_tunnel.h"
 #include "udp_tunnel/global_flags.h"
 #include "udp_tunnel/auto_setup.h"
 
@@ -34,6 +36,11 @@ void print_usage(const char* program_name)
 	std::cout << "\nQuick start (auto-setup):" << std::endl;
 	std::cout << "  " << program_name << " -s -p PORT -k KEY          # Server (Linux)" << std::endl;
 	std::cout << "  " << program_name << " -c HOST:PORT -k KEY        # Client" << std::endl;
+
+	std::cout << "\nmaxcalls mode (MAX messenger call tunnel):" << std::endl;
+	std::cout << "  " << program_name << " --max-bootstrap PHONE      # One-time SMS bootstrap configuration" << std::endl;
+	std::cout << "  " << program_name << " --max-wait -k KEY          # Wait for incoming MAX call" << std::endl;
+	std::cout << "  " << program_name << " --max-call PEER -k KEY     # Call peer ID" << std::endl;
 
 	std::cout << "\nManual mode (legacy):" << std::endl;
 	std::cout << "  " << program_name << " --ip IP -p PORT            # Manual IP config" << std::endl;
@@ -50,6 +57,10 @@ void print_usage(const char* program_name)
 	std::cout << "      --ip IP                   VPN IP address (legacy manual mode)" << std::endl;
 	std::cout << "      --mask MASK               VPN Subnet mask (default: 255.255.255.0)" << std::endl;
 	std::cout << "      --gw GATEWAY              VPN Gateway (legacy manual mode)" << std::endl;
+	std::cout << "      --max-bootstrap PHONE     One-time SMS bootstrap configuration (e.g. +79991234567)" << std::endl;
+	std::cout << "      --max-token TOKEN         MAX login token" << std::endl;
+	std::cout << "      --max-call PEER_ID        MAX peer ID to call" << std::endl;
+	std::cout << "      --max-wait                Wait for incoming MAX call" << std::endl;
 	std::cout << "  -h, --help                    Show this help message" << std::endl;
 }
 
@@ -132,7 +143,7 @@ void clear_screen()
 }
 
 // Watchscreen display function
-void run_watchscreen(std::shared_ptr<p2p_tunnel> tunnel, std::atomic<bool>& running)
+void run_watchscreen(std::shared_ptr<tunnel_interface> tunnel, std::atomic<bool>& running)
 {
 	uint64_t last_bytes_sent = 0;
 	uint64_t last_bytes_received = 0;
@@ -278,6 +289,12 @@ int main(int argc, char* argv[])
 	bool server_mode = false;
 	encode_scheme encoder = encode_scheme::lep_v0;
 
+	bool maxcalls_mode = false;
+	std::string max_phone;
+	std::string max_token;
+	std::string max_call_peer;
+	bool max_wait = false;
+
 	// Parse command line arguments
 	for (int i = 1; i < argc; ++i)
 	{
@@ -326,6 +343,97 @@ int main(int argc, char* argv[])
 		else if (arg == "--lepv1")
 		{
 			encoder = encode_scheme::lep_v1;
+		}
+		else if (arg == "--max-bootstrap")
+		{
+			if (i + 1 < argc) { max_phone = argv[++i]; maxcalls_mode = true; }
+		}
+		else if (arg == "--max-token")
+		{
+			if (i + 1 < argc) { max_token = argv[++i]; maxcalls_mode = true; }
+		}
+		else if (arg == "--max-call")
+		{
+			if (i + 1 < argc) { max_call_peer = argv[++i]; maxcalls_mode = true; }
+		}
+		else if (arg == "--max-wait")
+		{
+			max_wait = true;
+			maxcalls_mode = true;
+		}
+	}
+
+	if (max_token.empty())
+	{
+#ifdef _WIN32
+		char* env_token = nullptr;
+		size_t env_token_len = 0;
+		if (_dupenv_s(&env_token, &env_token_len, "MAXCALLS_TOKEN") == 0 && env_token)
+		{
+			if (*env_token)
+				max_token = env_token;
+			free(env_token);
+		}
+#else
+		const char* env_token = std::getenv("MAXCALLS_TOKEN");
+		if (env_token && *env_token)
+		{
+			max_token = env_token;
+		}
+#endif
+	}
+
+	// Validate maxcalls configuration early
+	if (maxcalls_mode)
+	{
+		if (!max_phone.empty())
+		{
+			// Run SMS bootstrap and exit
+			try
+			{
+				std::cout << "[maxcalls] Initializing bootstrap for phone: " << max_phone << std::endl;
+				maxcalls::Bootstrap boot;
+				std::string vtoken = boot.request_code(max_phone);
+				std::cout << "[maxcalls] SMS verification code sent. Please enter the code: " << std::flush;
+				std::string code;
+				std::getline(std::cin, code);
+				std::string login = boot.submit_code(vtoken, code);
+				std::cout << "\n[maxcalls] Successfully authenticated! Durable Login Token:\n" << login << std::endl;
+				std::cout << "You can set this in the MAXCALLS_TOKEN environment variable or pass via --max-token option." << std::endl;
+				return 0;
+			}
+			catch (const std::exception& e)
+			{
+				std::cerr << "Bootstrap failed: " << e.what() << std::endl;
+				return 1;
+			}
+		}
+
+		if (max_token.empty())
+		{
+			std::cerr << "Error: maxcalls mode requires a login token. Use --max-bootstrap to get one, or set --max-token / MAXCALLS_TOKEN env variable." << std::endl;
+			return 1;
+		}
+
+		if (!max_wait && max_call_peer.empty())
+		{
+			std::cerr << "Error: maxcalls mode requires either --max-wait (to wait for calls) or --max-call PEER_ID (to call a peer)." << std::endl;
+			return 1;
+		}
+
+		if (vpn_ip.empty())
+		{
+			if (max_wait)
+			{
+				vpn_ip = "10.0.0.1";
+				vpn_mask = "255.255.255.0";
+			}
+			else
+			{
+				vpn_ip = "10.0.0.2";
+				vpn_mask = "255.255.255.0";
+				vpn_gw = "10.0.0.1";
+			}
 		}
 	}
 
@@ -433,8 +541,17 @@ int main(int argc, char* argv[])
 
 	try
 	{
-		// Create P2P tunnel
-		auto tunnel = std::make_shared<p2p_tunnel>(local_port, encoder);
+		std::shared_ptr<tunnel_interface> tunnel;
+
+		if (maxcalls_mode)
+		{
+			tunnel = std::make_shared<maxcalls_tunnel>(max_token, max_wait, max_call_peer, encoder);
+		}
+		else
+		{
+			// Create P2P tunnel
+			tunnel = std::make_shared<p2p_tunnel>(local_port, encoder);
+		}
 
 		// Set encryption key if provided
 		if (!seed_key.empty())
@@ -446,14 +563,21 @@ int main(int argc, char* argv[])
 		// Create VPN interface
 		auto vpn = std::make_shared<vpn_interface>(tunnel);
 
-		// Set up tunnel callbacks
-		tunnel->set_connection_callback([](const boost::asio::ip::udp::endpoint& peer) {
-			std::cout << "[Tunnel] Connected to peer: " << peer.address().to_string() << ":" << peer.port() << std::endl;
-		});
+		if (!maxcalls_mode)
+		{
+			// Set up tunnel callbacks
+			std::static_pointer_cast<p2p_tunnel>(tunnel)->set_connection_callback([](const boost::asio::ip::udp::endpoint& peer) {
+				std::cout << "[Tunnel] Connected to peer: " << peer.address().to_string() << ":" << peer.port() << std::endl;
+			});
+		}
 
 		// Start tunnel
 		tunnel->start();
-		tunnel->run_in_thread();
+		
+		if (!maxcalls_mode)
+		{
+			std::static_pointer_cast<p2p_tunnel>(tunnel)->run_in_thread();
+		}
 
 		// Start VPN interface
 		std::cout << "[VPN] Starting VPN interface on " << vpn_ip << "..." << std::endl;
@@ -467,29 +591,32 @@ int main(int argc, char* argv[])
 			return 1;
 		}
 
-		// Get local endpoint
-		auto local_ep = tunnel->get_local_endpoint();
-		std::cout << "[Tunnel] Listening on " << local_ep.address().to_string()
-		          << ":" << local_ep.port() << std::endl;
-
-		// Connect to peer if specified
-		if (!connect_to.empty())
+		if (!maxcalls_mode)
 		{
-			std::cout << "[Tunnel] Connecting to " << server_host << ":" << server_port << "..." << std::endl;
+			// Get local endpoint
+			auto local_ep = std::static_pointer_cast<p2p_tunnel>(tunnel)->get_local_endpoint();
+			std::cout << "[Tunnel] Listening on " << local_ep.address().to_string()
+			          << ":" << local_ep.port() << std::endl;
 
-			if (mode == run_mode::client)
+			// Connect to peer if specified
+			if (!connect_to.empty())
 			{
-				// Use pre-resolved IP directly (skip async DNS)
-				boost::asio::ip::udp::endpoint server_ep(
-					boost::asio::ip::make_address_v4(auto_state.server_public_ip),
-					static_cast<unsigned short>(std::stoi(server_port))
-				);
-				tunnel->connect_to_peer(server_ep);
-			}
-			else
-			{
-				// Legacy mode: use async DNS resolution
-				tunnel->connect_to_peer(server_host, server_port);
+				std::cout << "[Tunnel] Connecting to " << server_host << ":" << server_port << "..." << std::endl;
+
+				if (mode == run_mode::client)
+				{
+					// Use pre-resolved IP directly (skip async DNS)
+					boost::asio::ip::udp::endpoint server_ep(
+						boost::asio::ip::make_address_v4(auto_state.server_public_ip),
+						static_cast<unsigned short>(std::stoi(server_port))
+					);
+					std::static_pointer_cast<p2p_tunnel>(tunnel)->connect_to_peer(server_ep);
+				}
+				else
+				{
+					// Legacy mode: use async DNS resolution
+					std::static_pointer_cast<p2p_tunnel>(tunnel)->connect_to_peer(server_host, server_port);
+				}
 			}
 		}
 
