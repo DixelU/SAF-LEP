@@ -432,7 +432,17 @@ int main(int argc, char* argv[])
 			{
 				vpn_ip = "10.0.0.2";
 				vpn_mask = "255.255.255.0";
+#ifdef _WIN32
+				// Windows has no source-based policy routing, so the maxcalls
+				// transport can't be kept off a full-tunnel default route.
+				// Fall back to split-tunnel (route only the VPN subnet) so the
+				// transport doesn't loop back into the tunnel and collapse it.
+				std::cout << "[maxcalls] Full-tunnel is not supported on Windows for the "
+				             "maxcalls transport; using split-tunnel (only 10.0.0.0/24 "
+				             "is routed)." << std::endl;
+#else
 				vpn_gw = "10.0.0.1";
+#endif
 			}
 		}
 	}
@@ -442,6 +452,7 @@ int main(int argc, char* argv[])
 	// ---------------------------------------------------------------
 	run_mode mode;
 	setup_state auto_state;
+	std::string maxcalls_bind_ip; // physical uplink IP the maxcalls transport binds to (Linux caller)
 
 	if (!vpn_ip.empty())
 	{
@@ -539,13 +550,30 @@ int main(int argc, char* argv[])
 		}
 	}
 
+#ifndef _WIN32
+	// maxcalls caller (full-tunnel on Linux): the transport has no single fixed
+	// server IP to exclude, so instead pin its sockets to the physical uplink IP
+	// and install a source-policy route that steers that source out the WAN,
+	// bypassing the VPN default route. Must run BEFORE the tunnel (libjuice)
+	// starts. The transmitter side (--max-wait) never redirects its own default,
+	// so it needs neither the binding nor the policy rule.
+	if (maxcalls_mode && !max_wait)
+	{
+		if (maxcalls_policy_setup(auto_state))
+			maxcalls_bind_ip = auto_state.wan_local_ip;
+		else
+			std::cerr << "[maxcalls] WARNING: could not set up transport policy routing; "
+			             "the transport may loop back into the tunnel." << std::endl;
+	}
+#endif
+
 	try
 	{
 		std::shared_ptr<tunnel_interface> tunnel;
 
 		if (maxcalls_mode)
 		{
-			tunnel = std::make_shared<maxcalls_tunnel>(max_token, max_wait, max_call_peer, encoder);
+			tunnel = std::make_shared<maxcalls_tunnel>(max_token, max_wait, max_call_peer, encoder, maxcalls_bind_ip);
 		}
 		else
 		{
@@ -588,6 +616,7 @@ int main(int argc, char* argv[])
 			// Teardown auto-setup before exiting
 			if (mode == run_mode::server) server_teardown(auto_state);
 			else if (mode == run_mode::client) client_teardown(auto_state);
+			maxcalls_policy_teardown(auto_state);
 			return 1;
 		}
 
@@ -695,6 +724,7 @@ int main(int argc, char* argv[])
 			server_teardown(auto_state);
 		else if (mode == run_mode::client)
 			client_teardown(auto_state);
+		maxcalls_policy_teardown(auto_state);
 	}
 	catch (const std::exception& e)
 	{
@@ -705,6 +735,7 @@ int main(int argc, char* argv[])
 			server_teardown(auto_state);
 		else if (mode == run_mode::client)
 			client_teardown(auto_state);
+		maxcalls_policy_teardown(auto_state);
 
 		return 1;
 	}

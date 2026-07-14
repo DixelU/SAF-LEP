@@ -31,7 +31,18 @@ struct setup_state
 	std::string local_gateway_ip;          // Physical gateway for static route
 	std::string local_gateway_iface;       // (Linux only) e.g. "eth0"
 	bool static_route_added = false;
+
+	// maxcalls transport policy routing (Linux only). Unlike the p2p tunnel the
+	// maxcalls transport has no single fixed server IP to exclude, so instead we
+	// bind its sockets to the physical uplink IP and steer that source out of the
+	// WAN with a policy-routing rule.
+	std::string wan_local_ip;              // Source IP of the physical default route
+	bool maxcalls_policy_added = false;
 };
+
+// Fixed routing table id used for the maxcalls transport bypass (Linux only).
+// A numeric id works without an /etc/iproute2/rt_tables entry.
+constexpr int MAXCALLS_POLICY_TABLE = 51821;
 
 // --- Platform detection ---
 
@@ -40,6 +51,20 @@ std::string detect_default_gateway();
 
 // Returns the WAN interface name (default route device). Empty on failure. Linux only.
 std::string detect_wan_interface();
+
+// Returns the local source IP the kernel uses to reach the internet over the
+// physical default route (e.g. "192.168.1.50"). Empty on failure. Linux only.
+std::string detect_wan_local_ip();
+
+// --- maxcalls transport policy routing (Linux only, no-op on Windows) ---
+//
+// Installs a source-based policy rule so packets sent from state.wan_local_ip
+// bypass the VPN's 0.0.0.0/1 + 128.0.0.0/1 override routes and egress the
+// physical uplink. Pass the same source IP as maxcalls Config.bind_address so
+// the transport's sockets are actually pinned to it. Detects wan_local_ip and
+// the gateway/interface itself; returns false if they can't be determined.
+bool maxcalls_policy_setup(setup_state& state);
+void maxcalls_policy_teardown(const setup_state& state);
 
 // --- DNS resolution ---
 

@@ -10,8 +10,9 @@ namespace dixelu
 namespace udp
 {
 
-maxcalls_tunnel::maxcalls_tunnel(const std::string& login_token, bool is_transmitter, const std::string& peer_id, encode_scheme scheme)
-	: login_token_(login_token), is_transmitter_(is_transmitter), peer_id_(peer_id), scheme_(scheme)
+maxcalls_tunnel::maxcalls_tunnel(const std::string& login_token, bool is_transmitter, const std::string& peer_id, encode_scheme scheme,
+	const std::string& bind_address)
+	: login_token_(login_token), is_transmitter_(is_transmitter), peer_id_(peer_id), scheme_(scheme), bind_address_(bind_address)
 {
 	dummy_endpoint_ = boost::asio::ip::udp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0);
 }
@@ -75,6 +76,7 @@ void maxcalls_tunnel::run_receive_loop()
 	{
 		maxcalls::Config cfg;
 		cfg.login_token = login_token_;
+		cfg.bind_address = bind_address_;
 		cfg.log = [this](const std::string& msg) {
 			stats_.add_log("[maxcalls] " + msg);
 			if (VERBOSE_MODE)

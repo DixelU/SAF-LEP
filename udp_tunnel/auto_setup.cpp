@@ -104,6 +104,20 @@ std::string detect_wan_interface()
 #endif
 }
 
+std::string detect_wan_local_ip()
+{
+#ifdef _WIN32
+	// Not needed on Windows (maxcalls policy routing is Linux only)
+	return "";
+#else
+	// "ip route get" resolves the actual source address the kernel would use
+	// for an internet destination over the current physical default route.
+	std::string line = popen_read_line("ip route get 1.1.1.1 2>/dev/null");
+	if (line.empty()) return "";
+	return extract_after(line, "src ");
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // DNS resolution
 // ---------------------------------------------------------------------------
@@ -310,6 +324,82 @@ void client_teardown(const setup_state& state)
 #endif
 		system(cmd.c_str());
 	}
+}
+
+// ---------------------------------------------------------------------------
+// maxcalls transport policy routing (Linux only)
+// ---------------------------------------------------------------------------
+
+bool maxcalls_policy_setup(setup_state& state)
+{
+#ifdef _WIN32
+	// Windows has no source-based policy routing via route/netsh, so the
+	// maxcalls full-tunnel bypass is Linux only. Callers keep Windows on
+	// split-tunnel instead. Nothing to do here.
+	(void)state;
+	std::cerr << "[AutoSetup] maxcalls policy routing is not supported on Windows" << std::endl;
+	return false;
+#else
+	std::string gw = detect_default_gateway();
+	std::string wan = detect_wan_interface();
+	state.wan_local_ip = detect_wan_local_ip();
+
+	if (gw.empty() || wan.empty() || state.wan_local_ip.empty())
+	{
+		std::cerr << "[AutoSetup] Could not determine WAN gateway/interface/source IP "
+		          << "for maxcalls policy routing (gw='" << gw << "' dev='" << wan
+		          << "' src='" << state.wan_local_ip << "')" << std::endl;
+		return false;
+	}
+
+	const std::string table = std::to_string(MAXCALLS_POLICY_TABLE);
+
+	std::cout << "[AutoSetup] maxcalls transport pinned to " << state.wan_local_ip
+	          << " via " << gw << " dev " << wan
+	          << " (policy table " << table << ")" << std::endl;
+
+	// A dedicated table carrying just the physical default. "dev <wan>" makes the
+	// gateway directly reachable on that link, so this route is self-sufficient
+	// even while the main table's default is overridden by the VPN /1 routes.
+	system(("ip route replace default via " + gw + " dev " + wan +
+	        " table " + table).c_str());
+
+	// Steer everything sourced from the bound uplink IP into that table. The
+	// maxcalls sockets bind to wan_local_ip (Config.bind_address), so their
+	// packets match this rule and bypass the VPN default route.
+	std::string rule = "from " + state.wan_local_ip + " table " + table;
+	// Remove any stale copy first so we don't stack duplicate rules on restart.
+	system(("ip rule del " + rule + " 2>/dev/null").c_str());
+	if (system(("ip rule add " + rule + " priority 1000").c_str()) != 0)
+	{
+		std::cerr << "[AutoSetup] WARNING: 'ip rule add " << rule
+		          << "' returned non-zero" << std::endl;
+	}
+	system("ip route flush cache 2>/dev/null");
+
+	state.maxcalls_policy_added = true;
+	return true;
+#endif
+}
+
+void maxcalls_policy_teardown(const setup_state& state)
+{
+#ifdef _WIN32
+	(void)state;
+#else
+	if (!state.maxcalls_policy_added) return;
+
+	const std::string table = std::to_string(MAXCALLS_POLICY_TABLE);
+	std::cout << "[AutoSetup] Removing maxcalls policy routing" << std::endl;
+
+	if (!state.wan_local_ip.empty())
+	{
+		system(("ip rule del from " + state.wan_local_ip + " table " + table +
+		        " 2>/dev/null").c_str());
+	}
+	system(("ip route flush table " + table + " 2>/dev/null").c_str());
+	system("ip route flush cache 2>/dev/null");
+#endif
 }
 
 // ---------------------------------------------------------------------------
