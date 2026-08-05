@@ -79,6 +79,7 @@ void maxcalls_tunnel::run_receive_loop()
 		maxcalls::Config cfg;
 		cfg.login_token = login_token_;
 		cfg.bind_address = bind_address_;
+		cfg.should_stop = [this] { return !running_.load(); };
 		cfg.log = [this](const std::string& msg) {
 			stats_.add_log("[maxcalls] " + msg);
 			if (VERBOSE_MODE)
@@ -139,8 +140,11 @@ void maxcalls_tunnel::run_receive_loop()
 	}
 	catch (const std::exception& e)
 	{
-		stats_.add_log("[Tunnel] Fatal error in receive loop: " + std::string(e.what()));
-		std::cerr << "[Tunnel] maxcalls fatal error: " << e.what() << std::endl;
+		if (running_)
+		{
+			stats_.add_log("[Tunnel] Fatal error in receive loop: " + std::string(e.what()));
+			std::cerr << "[Tunnel] maxcalls fatal error: " << e.what() << std::endl;
+		}
 	}
 
 	running_ = false;
