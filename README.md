@@ -1,296 +1,451 @@
-# SAF-LEP (Simple/Secure AF - Low Entropy Protocol)
+# SAF-LEP
 
-SAF-LEP is a Proof-of-Concept VPN tunneling tool designed to evade Deep Packet Inspection (DPI) by masquerading encrypted traffic as low-entropy "noise" or potentially mimicking unencrypted media streams (future work).
+SAF-LEP is an experimental IPv4 VPN that moves packets from a virtual network
+interface through either a direct UDP peer or a MAX-assisted ICE connection.
+It runs as a desktop CLI on Windows and Linux, and as an Android VPN client for
+the direct UDP transport.
 
-The core idea is **Low Entropy Protocol (LEP)**: instead of sending a solid block of high-entropy encrypted data (which is easily flagged by DPI as "unknown encrypted protocol" or WireGuard/OpenVPN), LEP embeds the encrypted payload into a larger, lower-entropy frame, or distributes it in a way that statistically resembles natural data.
+The repository includes:
 
----
+- a cross-platform C++ tunnel core;
+- Windows TAP and Linux TUN adapters;
+- a direct UDP transport with fragmentation, loss detection, and retransmission;
+- a desktop MaxTunnel transport backed by the adjacent SAF-AVTTS repository;
+- an Android VpnService application for direct UDP connections;
+- LEP v0, LEP v1, and low-overhead raw packet framing.
 
-## Security Notice
+> [!WARNING]
+> SAF-LEP is a research/proof-of-concept project. Its current seed-key cipher is
+> custom, unauthenticated, and not cryptographically secure. Do not rely on it
+> for privacy, integrity, identity authentication, or sensitive traffic. Raw
+> mode requires a key to prevent accidental plaintext operation, but that
+> requirement does not turn the current cipher into production-grade encryption.
 
-> **This is a Proof-of-Concept project for research and educational purposes only.**
+## Current support
 
-**DO NOT use this for protecting sensitive data.** The cryptographic implementation is intentionally simplified for demonstration purposes and has known weaknesses:
+| Platform | Direct UDP | MaxTunnel | Virtual interface | Intended role |
+| --- | --- | --- | --- | --- |
+| Linux desktop | Yes | Yes | TUN | Client, peer, or exit node |
+| Windows desktop | Yes | Yes | TAP-Windows | Client or manually configured peer |
+| Android | Yes | No | Android VpnService/TUN | Client |
+| macOS / iOS | No | No | - | Not implemented |
 
-- Custom stream cipher based on xorshift - **not cryptographically secure**
-- Key derivation uses DJB2 hash instead of proper KDFs (PBKDF2, Argon2)
-- Non-cryptographic PRNG (LCG) for ground state generation
+Important boundaries:
 
-The goal of this project is **DPI evasion**, not secure encryption. If you need actual security, use established VPNs (WireGuard, OpenVPN) or layer this tool with proper encryption.
+- **MaxTunnel is currently desktop-only.** Android does not build or link
+  SAF-AVTTS and has no MAX authentication, call, or wait UI.
+- **Automatic exit-node setup is Linux-only.** Windows can run the transport,
+  but server-side forwarding/NAT must be configured outside SAF-LEP.
+- The MaxTunnel datagram path only interoperates with another custom client
+  using SAF-AVTTS. It does not exchange VPN data with the stock MAX app.
 
----
+## Transport and framing choices
 
-## Features
-- **Cross-Platform**: Runs on **Windows** (using TAP-Windows adapter) and **Linux** (using TUN interface). **Android** support is in progress.
-- **Selectable Transport**: Direct UDP or a peer datagram connection established through a MAX messenger call (MaxTunnel).
-- **Fragmentation & Reassembly**: Custom packet fragmentation over either datagram transport.
-- **Traffic-Efficient Raw Framing**: Adds only a four-byte packet index when LEP cover traffic is unnecessary.
-- **Resiliency**: Implements packet loss detection and retransmission (ARQ) with backoff logic to prevent network flooding.
-- **Live Watchscreen**: Real-time monitoring of VPN statistics, throughput, and packet events with `-w` flag.
-- **DPI Evasion**:
-    - **Low Entropy Encoding**: Payload is encoded to reduce statistical randomness.
-    - **Jitter/Padding**: (Planned) Traffic shaping to hide packet timing signatures.
+Transport and packet framing are independent choices. Both peers must use the
+same framing mode and the same seed key.
 
---- 
+### Transports
 
-## Platform Support
+**Direct UDP**
 
-### ✅ Fully Implemented
-- **Windows** (TAP-Windows adapter)
-- **Linux** (TUN interface)
+- available on Windows, Linux, and Android;
+- listens on or connects to a UDP host and port;
+- includes SAF-LEP's acknowledgement, loss-detection, and retransmission logic;
+- may require a public UDP port, firewall rule, or router port-forward on the
+  listening side.
 
-### 🚧 In Progress
-- **Android** (VpnService API) - JNI bridge and core C++ integration complete, but full app not yet finalized. See `android/` directory for bare-bones implementation.
+**MaxTunnel**
 
-### 📋 Planned
-- **Android Server Mode** - Allow Android devices to act as VPN exit nodes
-- **iOS** Support - Using NetworkExtension framework
-- **macOS** Support - Using utun interface
+- available on Windows and Linux desktop builds;
+- uses MAX for account authentication and call signaling, then carries opaque
+  datagrams through the ICE path provided by SAF-AVTTS;
+- supports direct, STUN-assisted, and relayed connectivity as selected by ICE;
+- automatically reconnects after a dropped call;
+- normally needs a different MAX account and token at each endpoint.
 
-## Near Future Plans
+### Framing modes
 
-- **Complete Android VPN Client** - Finish the Android app with proper UI and integration
-    - High priority ⭐
-- Fully automatic setup (just address and mode flag, nothing more 😅)
-- Containerized version (Docker)
-- More cover-traffic modes (LEP v0, LEP v1, and minimal raw framing are implemented)
-    - `html`
-    - `raw_text`
-    - `rtsp`
-    - ... whatever 💁
-- Improved NAT traversal (STUN/TURN integration)
+| CLI option | Mode | Wire behaviour | Notes |
+| --- | --- | --- | --- |
+| none | LEP v0 | Low-entropy expansion | Default and most compatible |
+| --lepv1 | LEP v1 | Experimental LEP framing with integrity checks | Both peers must opt in |
+| --raw | Raw | 4-byte big-endian packet index followed by the encrypted fragment body | Requires -k |
 
----
+Raw mode exists for transports that already preserve datagram boundaries. It
+does not apply LEP's byte expansion. The cleartext packet index selects the
+per-packet cipher stream; the fragment body, including SAF-LEP's fragmentation
+metadata, is transformed before framing.
 
-## Build Instructions
+For MaxTunnel, raw mode also increases the fragment payload from 150 to 1200
+bytes. A typical 1500-byte VPN packet therefore needs two MaxTunnel datagrams
+instead of ten, before ICE/TURN and network-layer overhead. Direct UDP keeps its
+150-byte fragments because its reliability protocol is tuned around that size.
 
-### Prerequisites
-- **CMake** (3.10+)
-- **Boost Libraries** (System, Thread, Asio)
-- **C++23 Compliant Compiler** (MSVC for Windows, GCC/Clang for Linux)
+For cellular MaxTunnel use, the intended pairing is therefore:
 
-### Linux
-```bash
-mkdir build_linux
-cd build_linux
-cmake ..
-make
-```
+~~~text
+MaxTunnel + --raw + a non-empty -k seed
+~~~
 
-### Windows
+## Prerequisites
 
-#### Option 1: CMake Build
-1. Open the folder in Visual Studio (or use CMake GUI).
-2. Ensure `Boost_ROOT` is set if not in standard paths.
-3. Build the `SAF-LEP.exe` target.
+### Repository layout
 
-#### Option 2: Visual Studio Solution (Recommended)
-Open `SAF-LEP-ExPuN.sln` in Visual Studio. Requires static Boost libraries installed via vcpkg:
-```bash
-# Install vcpkg globally if not already installed
-git clone https://github.com/Microsoft/vcpkg.git
-cd vcpkg
-.\bootstrap-vcpkg.bat
-.\vcpkg integrate install
+The desktop build integrates the maxcalls library with a relative path, so the
+two repositories must be siblings:
 
-# Install Boost
-.\vcpkg install boost:x64-windows-static
-```
+~~~text
+parent/
+|-- SAF-AVTTS/
++-- SAF-LEP/
+~~~
 
-### Android (Work in Progress)
-**Note:** Android support is currently in development.
+SAF-AVTTS is required even when you only plan to use direct UDP because it is
+currently part of the desktop build graph.
 
-For developers interested in contributing or testing, see the [Android README](android/README.md) for the current state and build instructions.
+### Windows desktop
 
----
+- a 64-bit C++23 toolchain;
+- CMake 3.22 or newer, or Visual Studio 2022 for the included solution;
+- Boost.System;
+- SAF-AVTTS dependencies: Boost.Beast/JSON/UUID, OpenSSL, LZ4, and libjuice;
+- a TAP-Windows adapter;
+- an elevated terminal when creating routes or configuring the adapter.
 
-## Usage Instructions
+The included Visual Studio project uses the first TAP-Windows adapter it finds.
+Adapter names currently need to be representable by the narrow-character
+netsh command path; rename the adapter to an ASCII-only name if setup fails.
 
-### Command-Line Options
+### Linux desktop
 
-```
-Usage: SAF-LEP [OPTIONS]
+- a C++23 compiler and CMake 3.22 or newer;
+- Boost.System and the SAF-AVTTS dependencies;
+- /dev/net/tun, iproute2, and iptables;
+- root privileges or equivalent capabilities for TUN and route changes.
 
-Options:
-  -p, --port PORT          Local UDP port
-  -c, --connect HOST:PORT  Connect using direct UDP
-  -v, --verbose            Enable verbose logging
-  -w, --watchscreen        Enable live stats watchscreen
-      --lepv1              Use experimental LEP v1 encoding
-      --raw                Use four-byte-index raw framing (requires -k)
-      --ip IP              VPN IP address (e.g. 10.0.0.1)
-      --mask MASK          VPN subnet mask (default: 255.255.255.0)
-      --gw GATEWAY         VPN gateway (optional)
-      --max-qr-bootstrap   Obtain a MAX login token through QR authentication
-      --max-bootstrap PHONE
-                          Obtain a MAX login token through SMS/QR authentication
-      --max-token TOKEN    MAX login token (or set MAXCALLS_TOKEN)
-      --max-call PEER_ID   Call a MaxTunnel peer
-      --max-wait           Wait for an incoming MaxTunnel peer
-  -k, --seed-key KEY       Encryption seed key; mandatory with --raw
-  -h, --help               Show help
-```
+See the SAF-AVTTS README for its complete dependency list and platform notes.
 
-### MaxTunnel with low-overhead raw framing
+### Android
 
-MaxTunnel uses the datagram-preserving maxcalls::Connection supplied by the
-adjacent SAF-AVTTS project instead of SAF-LEP's direct UDP socket. Bootstrap each
-MAX account once, then use the same seed and encoding on both peers:
+The Android application requires Android SDK Platform 36, Build Tools 36,
+NDK 27.0.12077973, CMake 3.22.1, and JDK 17 or newer. It builds arm64-v8a and
+x86_64 variants and supports Android API 24 or newer.
 
-    # Exit peer
-    sudo ./SAF-LEP --max-wait --raw -k "shared seed"
+See [android/README.md](android/README.md) for SDK setup, Boost header handling,
+command-line builds, installation, and the UI walkthrough.
 
-    # Calling peer
-    ./SAF-LEP --max-call PEER_ID --raw -k "shared seed"
+## Building
 
-Raw framing sends a four-byte, network-order packet index followed by the
-encrypted fragment. On MaxTunnel it also uses 1200-byte fragment payloads,
-reducing a typical 1500-byte VPN packet from ten transport datagrams to two.
-SAF-LEP refuses to start raw mode without a seed key. LEP v0 remains the default.
+### Linux with CMake
 
-### 1. Server Setup (Linux)
-The server acts as the exit node. It needs to forward traffic from the VPN interface (`tun0`) to the internet (`eth0` or `wlan0`).
+After installing the SAF-LEP and SAF-AVTTS dependencies and placing the
+repositories side by side:
 
-**Enable IP Forwarding & NAT:**
-```bash
-# 1. Enable IP Forwarding
-sudo sysctl -w net.ipv4.ip_forward=1
+~~~bash
+cd SAF-LEP
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+~~~
 
-# 2. Enable NAT (Masquerade) for outgoing traffic
-# Replace 'eth0' with your internet interface name (check with `ip addr`)
-sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+The executable is normally written to build/SAF-LEP.
 
-# 3. Allow Forwarding
-sudo iptables -A FORWARD -i tun0 -o eth0 -j ACCEPT
-sudo iptables -A FORWARD -i eth0 -o tun0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+### Windows with Visual Studio
 
-# 4. Enable MSS Clamping (Critical for some sites to load)
-sudo iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-```
+First build the sibling SAF-AVTTS repository so that maxcalls.lib exists:
 
-**Run Server:**
-```bash
-sudo ./SAF-LEP -p 14578 --ip 10.0.0.1
-```
+~~~powershell
+cd ..\SAF-AVTTS
+cmake --preset vcpkg-x64-static
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+cd ..\SAF-LEP
+~~~
 
-### 2. Client Setup
+Adjust SAF-AVTTS/CMakePresets.json if vcpkg is installed somewhere other than
+the preset's toolchain path. Then open SAF-LEP-ExPuN.sln and build x64 Release.
 
-**⚠️ CRITICAL: Prevent Routing Loops ⚠️**
-Before starting the client, you **MUST** add a static route to the VPN Server's *Public IP* via your *Physical Gateway*. If you don't, the encrypted VPN packets will try to go through the VPN tunnel itself, creating a loop.
+The solution expects:
 
-#### Linux Client
-```bash
-# 1. Add route to server public IP via local gateway
-# Example: Server=1.2.3.4, LocalGateway=192.168.1.1
-sudo ip route add 1.2.3.4 via 192.168.1.1
+- Release maxcalls.lib in ..\SAF-AVTTS\build;
+- Debug maxcalls.lib in ..\SAF-AVTTS\build-debug.
 
-# 2. Run Client
-sudo ./SAF-LEP -c 1.2.3.4:14578 --ip 10.0.0.2 --gw 10.0.0.1
-```
+The root CMakeLists.txt also supports an integrated CMake build, but its current
+Windows Boost hints point at D:/Progs/mingw64. Override or update those hints
+for a different local toolchain.
 
-#### Windows Client
+### Android
 
-**⚠️ CRITICAL: TAP Adapter Name Requirements ⚠️**
-The TAP-Windows adapter name **MUST contain only ASCII characters**. Non-ASCII characters (e.g., Cyrillic, Chinese, special symbols) in the adapter name will cause configuration failures because Windows `netsh` commands may not handle encoding properly.
+From the android directory:
 
-**To rename your TAP adapter:**
-1. Open **Control Panel** → **Network and Sharing Center** → **Change adapter settings**
-2. Find your TAP adapter (usually named "Ethernet 2" or "TAP-Windows Adapter V9")
-3. Right-click → **Rename** → Use only English letters, numbers, spaces, and basic punctuation
-4. Examples of **GOOD** names: `VPN-TAP`, `SAF_LEP_Adapter`, `TAP Adapter 1`
-5. Examples of **BAD** names: `VPN适配器`, `Адаптер`, `VPN⚡Adapter`
+~~~powershell
+.\gradlew.bat :app:assembleDebug
+~~~
 
-**Setup Commands:**
-```bash
-# 1. Add route to server public IP via local gateway
-# Open Admin PowerShell/CMD
-# Example: Server=1.2.3.4, LocalGateway=192.168.1.1
-route add 1.2.3.4 mask 255.255.255.255 192.168.1.1 metric 1
+On Linux or macOS hosts:
 
-# 2. Run Client
-./SAF-LEP.exe -c 1.2.3.4:14578 --ip 10.0.0.2 --gw 10.0.0.1
-```
+~~~bash
+./gradlew :app:assembleDebug
+~~~
 
-### 3. Verification
-From the Client:
-```bash
-# Ping the server's VPN IP
-ping 10.0.0.1
+The detailed Android build notes and APK path are in
+[android/README.md](android/README.md).
 
-# Check internet connectivity (should hop through 10.0.0.1)
-tracert 8.8.8.8   # Windows
-traceroute 8.8.8.8 # Linux
-```
+## Quick start: direct UDP
 
----
+The defaults use VPN subnet 10.0.0.0/24, with 10.0.0.1 on the listening side
+and 10.0.0.2 on the connecting side.
+
+### Linux exit node
+
+Run in an elevated shell:
+
+~~~bash
+sudo ./build/SAF-LEP -s -p 14578 -k "shared seed"
+~~~
+
+In automatic server mode SAF-LEP detects the outward-facing interface, enables
+IPv4 forwarding if needed, and adds temporary iptables forwarding, MASQUERADE,
+and TCP MSS-clamping rules. It removes the rules and restores ip_forward if it
+changed it on a normal shutdown.
+
+Allow UDP port 14578 in the host firewall. If the server is behind a router,
+forward that UDP port to the server.
+
+### Desktop client
+
+Linux:
+
+~~~bash
+sudo ./build/SAF-LEP -c vpn.example.net:14578 -k "shared seed"
+~~~
+
+Windows, from an elevated terminal:
+
+~~~powershell
+.\SAF-LEP-ExPuN.exe -c vpn.example.net:14578 -k "shared seed"
+~~~
+
+Automatic client mode resolves the server before installing VPN routes and pins
+the server's public IPv4 address to the existing physical gateway. This keeps
+the transport socket out of the VPN and prevents a routing loop.
+
+Add the same framing flag at both ends when changing the default. For example:
+
+~~~bash
+sudo ./build/SAF-LEP -s -p 14578 --raw -k "shared seed"
+sudo ./build/SAF-LEP -c vpn.example.net:14578 --raw -k "shared seed"
+~~~
+
+Press Ctrl+C for a clean route and firewall teardown.
+
+## Quick start: MaxTunnel
+
+MaxTunnel is available only in the Windows and Linux desktop CLI.
+
+The commands below use the Linux executable path. On Windows, use an elevated
+terminal, replace ./build/SAF-LEP with .\SAF-LEP-ExPuN.exe, and omit sudo.
+
+### 1. Bootstrap each MAX account
+
+QR bootstrap is recommended:
+
+~~~bash
+./build/SAF-LEP --max-qr-bootstrap
+~~~
+
+Open or scan the printed link with the official MAX app and complete 2FA if
+requested. The command prints a login token. Treat this token as a secret and
+store a separate token at each endpoint.
+
+SMS bootstrap is also available:
+
+~~~bash
+./build/SAF-LEP --max-bootstrap +79991234567
+~~~
+
+If the SMS path encounters CAPTCHA, the CLI falls back to QR bootstrap.
+
+### 2. Provide the token
+
+Linux:
+
+~~~bash
+export MAXCALLS_TOKEN="endpoint login token"
+~~~
+
+PowerShell:
+
+~~~powershell
+$env:MAXCALLS_TOKEN = "endpoint login token"
+~~~
+
+You can alternatively pass --max-token TOKEN on the command line, although
+environment variables avoid placing the token directly in shell history.
+
+### 3. Start the waiting endpoint
+
+~~~bash
+sudo ./build/SAF-LEP --max-wait --raw -k "shared seed"
+~~~
+
+After authentication, SAF-LEP prints the endpoint's external MAX user ID. Give
+that ID to the caller.
+
+### 4. Call it from the other endpoint
+
+~~~bash
+sudo ./build/SAF-LEP --max-call PEER_EXTERNAL_ID --raw -k "shared seed"
+~~~
+
+The caller defaults to VPN address 10.0.0.2/24 with gateway 10.0.0.1, so it
+installs full-tunnel routes. SAF-LEP pins MAX, ICE, DNS, and relay transport
+traffic to the physical uplink: source-policy routing on Linux and dynamic /32
+bypass routes on Windows.
+
+The waiting endpoint defaults to 10.0.0.1/24 without a VPN gateway. Unlike the
+direct UDP -s mode, --max-wait does **not** automatically enable forwarding or
+NAT. If it is meant to act as an Internet exit node, configure OS forwarding,
+firewall rules, and masquerading/NAT on that machine separately.
+
+## Android client
+
+The Android application is a direct-UDP client. In the UI, configure:
+
+- server hostname or IPv4 address and UDP port;
+- LEP v0, LEP v1, or raw framing;
+- the same seed key used by the desktop peer;
+- VPN address, prefix length, and optional gateway;
+- optional verbose logging.
+
+Raw framing cannot connect without a non-empty seed key. Leaving the gateway
+empty routes only the configured VPN subnet; setting a gateway requests the
+full IPv4 tunnel routes.
+
+Android protects the transport socket with VpnService.protect(), so its own UDP
+connection bypasses the VPN. It does not currently support MAX bootstrap,
+MaxTunnel call/wait modes, or acting as an exit node.
+
+## Manual and split-tunnel configuration
+
+Supplying --ip selects legacy/manual mode and bypasses the automatic desktop
+server/client route setup. Use it when addresses or external routing are being
+managed explicitly.
+
+Manual listening peer:
+
+~~~bash
+sudo ./build/SAF-LEP -s -p 14578 --ip 10.20.0.1 --mask 255.255.255.0 -k "shared seed"
+~~~
+
+Manual connecting peer:
+
+~~~bash
+sudo ./build/SAF-LEP -c 203.0.113.10:14578 --ip 10.20.0.2 \
+  --mask 255.255.255.0 --gw 10.20.0.1 -k "shared seed"
+~~~
+
+A non-empty --gw installs two /1 routes and captures all IPv4 traffic. Omitting
+--gw leaves the existing default route in place and routes only the VPN subnet.
+
+In manual full-tunnel mode, you are responsible for keeping the direct UDP or
+MaxTunnel transport endpoints reachable through the physical interface and for
+configuring forwarding/NAT at the exit node.
+
+## CLI reference
+
+~~~text
+Connection:
+  -s, --server                    Listen for a direct UDP peer
+  -c, --connect HOST:PORT         Connect to a direct UDP peer
+  -p, --port PORT                 UDP listen port
+  -k, --seed-key KEY             Shared seed for payload transformation
+
+Framing:
+      --lepv1                     Experimental LEP v1
+      --raw                       Minimal 4-byte-index framing; requires -k
+
+VPN:
+      --ip IP                     VPN address; selects manual mode
+      --mask MASK                 VPN subnet mask
+      --gw GATEWAY                VPN gateway; non-empty means full IPv4 tunnel
+
+MaxTunnel (desktop only):
+      --max-qr-bootstrap          Bootstrap a MAX token using a QR link
+      --max-bootstrap PHONE       Bootstrap using SMS, with QR fallback
+      --max-token TOKEN           Use TOKEN instead of MAXCALLS_TOKEN
+      --max-call PEER_ID          Call a MAX external user ID
+      --max-wait                  Wait for an incoming custom call
+
+Diagnostics:
+  -v, --verbose                   Print packet events
+  -w, --watchscreen               Show a live terminal dashboard
+  -h, --help                      Show help
+~~~
+
+Direct UDP requires one of --server or --connect. MaxTunnel requires
+--max-call or --max-wait; choose only one role per process. --raw is rejected
+unless -k is non-empty.
 
 ## Troubleshooting
 
-### "Reassembly Desync" or Packet Loss
-- Ensure both Client and Server are running the latest version.
-- Check firewall on Server (allow UDP port 14578).
-- Check Windows Firewall on Client (allow `SAF-LEP.exe`).
+**No direct UDP peer appears**
 
-### Windows: "General Failure" on Ping
-- This usually means the TAP adapter is not configured correctly or the route is missing.
-- The application now attempts to force the route to the TAP interface index. Check logs for `Using Interface Index: X`.
+- Confirm the listener's UDP port is allowed by the host firewall.
+- Add router port-forwarding if the listener is behind NAT.
+- Verify both sides use the same framing mode, key, and VPN subnet.
+- Use -v to see packet events and retransmission activity.
 
-### Windows: TAP Adapter Configuration Fails
-- **Check adapter name encoding**: Ensure your TAP adapter has an **ASCII-only** name (see Windows Client Setup section above).
-- **Symptoms**: Application starts but IP configuration fails, or `netsh` commands fail silently.
-- **Solution**: Rename your TAP adapter to contain only English letters, numbers, and basic punctuation.
+**MaxTunnel authenticates but cannot carry traffic**
 
-### Windows: "Unidentified Network"
-- This is normal for TAP adapters without a default gateway. It does not affect functionality as long as the routes are correct.
+- Verify that each endpoint uses a valid token for its intended MAX account and
+  that the caller has the correct external user ID.
+- Check that both peers use the same framing mode and key.
+- Ensure the physical uplink still has working DNS and Internet connectivity.
+- On a full-tunnel caller, look for maxcalls transport-policy or bypass-route
+  messages during startup.
+- SAF-AVTTS may log a benign ICE role conflict while its tiebreaker resolves it.
 
----
+**The client loses Internet access**
 
-## Known Limitations
+- The exit node must have IPv4 forwarding and NAT/masquerading.
+- Automatic Linux setup is used only by direct UDP -s without --ip.
+- MaxTunnel wait mode and all Windows server/manual configurations need
+  forwarding and NAT configured separately.
+- In manual mode, ensure the transport endpoint has a physical-interface bypass
+  route before enabling the VPN default routes.
 
-### Design Limitations (By Design for PoC)
+**Windows cannot open the virtual adapter**
 
-- **Weak Cryptography**: Intentionally simplified; see Security Notice above
-- **No Perfect Forward Secrecy**: Static keys only
-- **No Authentication**: Peers are not cryptographically authenticated
-- **Hardcoded MAC Addresses**: Uses fixed dummy MAC for ARP responses
+- Install TAP-Windows and run from an elevated terminal.
+- Check that an adapter exists and, if necessary, give it an ASCII-only name.
+- SAF-LEP currently selects the first matching TAP adapter.
 
-### Contributions Welcome
+**Android connects but no packets return**
 
-PRs for improvements and new encoding modes are welcome!
+- Confirm the server is a direct UDP SAF-LEP peer; Android cannot call a
+  MaxTunnel endpoint.
+- Match framing, seed, VPN address range, and gateway configuration.
+- Check the Android status/log view and the desktop peer's -v output.
+- Make sure the listening UDP port is reachable from the cellular or Wi-Fi
+  network being tested.
 
----
+## Security and protocol limitations
 
-## Architecture Overview
+- The current cipher uses custom DJB2-like key derivation and a xorshift-based
+  XOR stream. It has no accepted security proof.
+- Packets have no cryptographic authentication or replay protection. LEP v1
+  checks are not a substitute for a message authentication code.
+- The raw packet index is intentionally visible on the wire.
+- Reusing a seed, packet-index wraparound, or active packet modification can
+  undermine confidentiality and integrity.
+- SAF-AVTTS does not add DTLS or SRTP to the ICE datagram path.
+- IPv6 tunnelling is not implemented.
+- Crash or forced termination may leave routes or firewall state that needs
+  manual cleanup.
 
-```
-┌─────────────────────────────────────────────────────┐
-│              Application Layer                      │
-│     (Ping, HTTP, etc. on VPN interface)             │
-└──────────────────────┬──────────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────────┐
-│           VPN Interface Layer                       │
-│    (TAP/TUN adapter - Ethernet/IP packets)          │
-└──────────────────────┬──────────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────────┐
-│       Fragmentation/Reassembly Layer                │
-│       (150-byte LEP / 1200-byte raw MaxTunnel)      │
-└──────────────────────┬──────────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────────┐
-│            Encryption Layer                         │
-│         (XOR-based stream cipher)                   │
-└──────────────────────┬──────────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────────┐
-│            Packet Framing Layer                     │
-│       (LEP v0, LEP v1, or 4-byte-index raw)         │
-└──────────────────────┬──────────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────────┐
-│              Datagram Transport                     │
-│          (Direct UDP or MaxTunnel over ICE)         │
-└─────────────────────────────────────────────────────┘
-```
+A production security design should replace the current transform with an
+authenticated-encryption construction, use a real password KDF or negotiated
+session keys, bind peer identity to authentication, prevent nonce reuse, and
+include replay protection.
 
