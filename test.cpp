@@ -479,32 +479,9 @@ int main(int argc, char* argv[])
 			{
 				vpn_ip = "10.0.0.2";
 				vpn_mask = "255.255.255.0";
-#ifdef _WIN32
-				// Windows has no source-based policy routing, so the maxcalls
-				// transport can't be kept off a full-tunnel default route.
-				// Fall back to split-tunnel (route only the VPN subnet) so the
-				// transport doesn't loop back into the tunnel and collapse it.
-				std::cout << "[maxcalls] Full-tunnel is not supported on Windows for the "
-				             "maxcalls transport; using split-tunnel (only 10.0.0.0/24 "
-				             "is routed)." << std::endl;
-#else
 				vpn_gw = "10.0.0.1";
-#endif
 			}
 		}
-
-#ifdef _WIN32
-		// MAX signaling and ICE must stay on the physical connection. Windows
-		// has no source-policy routing equivalent to the Linux implementation,
-		// so a caller-supplied legacy gateway must not install full-tunnel /1
-		// routes and recursively capture the MAX transport itself.
-		if (!vpn_gw.empty())
-		{
-			std::cout << "[maxcalls] Ignoring --gw on Windows; maxcalls requires "
-			             "split-tunnel routing (only the configured VPN subnet)." << std::endl;
-			vpn_gw.clear();
-		}
-#endif
 	}
 
 	// ---------------------------------------------------------------
@@ -512,7 +489,8 @@ int main(int argc, char* argv[])
 	// ---------------------------------------------------------------
 	run_mode mode;
 	setup_state auto_state;
-	std::string maxcalls_bind_ip; // physical uplink IP the maxcalls transport binds to (Linux caller)
+	std::string maxcalls_bind_ip; // physical uplink IP the maxcalls transport binds to
+	std::function<bool(const std::string&)> maxcalls_address_callback;
 
 	if (!vpn_ip.empty())
 	{
@@ -610,22 +588,28 @@ int main(int argc, char* argv[])
 		}
 	}
 
-#ifndef _WIN32
-	// maxcalls caller (full-tunnel on Linux): the transport has no single fixed
-	// server IP to exclude, so instead pin its sockets to the physical uplink IP
-	// and install a source-policy route that steers that source out the WAN,
-	// bypassing the VPN default route. Must run BEFORE the tunnel (libjuice)
-	// starts. The transmitter side (--max-wait) never redirects its own default,
-	// so it needs neither the binding nor the policy rule.
-	if (maxcalls_mode && !max_wait)
+	// A full-tunnel maxcalls caller must preserve its own control/data transport
+	// on the physical uplink. Linux uses source-policy routing; Windows owns a
+	// dynamic set of /32 routes reported by AVTTS. This must happen before the
+	// TAP/TUN default-route override is installed.
+	if (maxcalls_mode && !max_wait && !vpn_gw.empty())
 	{
 		if (maxcalls_policy_setup(auto_state))
+		{
 			maxcalls_bind_ip = auto_state.wan_local_ip;
+			maxcalls_address_callback = [&auto_state](const std::string& address) {
+				return maxcalls_policy_add_transport_address(auto_state, address);
+			};
+		}
 		else
-			std::cerr << "[maxcalls] WARNING: could not set up transport policy routing; "
-			             "the transport may loop back into the tunnel." << std::endl;
+		{
+			std::cerr << "[maxcalls] Could not set up transport bypass; refusing to enable "
+			             "a looping full tunnel." << std::endl;
+			if (mode == run_mode::server) server_teardown(auto_state);
+			else if (mode == run_mode::client) client_teardown(auto_state);
+			return 1;
+		}
 	}
-#endif
 
 	try
 	{
@@ -633,7 +617,8 @@ int main(int argc, char* argv[])
 
 		if (maxcalls_mode)
 		{
-			tunnel = std::make_shared<maxcalls_tunnel>(max_token, max_wait, max_call_peer, encoder, maxcalls_bind_ip);
+			tunnel = std::make_shared<maxcalls_tunnel>(max_token, max_wait, max_call_peer, encoder,
+				maxcalls_bind_ip, maxcalls_address_callback);
 		}
 		else
 		{

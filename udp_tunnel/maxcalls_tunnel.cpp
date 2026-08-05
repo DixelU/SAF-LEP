@@ -47,9 +47,9 @@ std::string make_device_id()
 } // namespace
 
 maxcalls_tunnel::maxcalls_tunnel(const std::string& login_token, bool is_transmitter, const std::string& peer_id, encode_scheme scheme,
-	const std::string& bind_address)
+	const std::string& bind_address, std::function<bool(const std::string&)> prepare_transport_address)
 	: login_token_(login_token), is_transmitter_(is_transmitter), peer_id_(peer_id), scheme_(scheme), bind_address_(bind_address),
-	  device_id_(make_device_id())
+	  prepare_transport_address_(std::move(prepare_transport_address)), device_id_(make_device_id())
 {
 	dummy_endpoint_ = boost::asio::ip::udp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0);
 }
@@ -129,6 +129,7 @@ void maxcalls_tunnel::run_receive_loop()
 			cfg.login_token = login_token_;
 			cfg.device_id = device_id_;
 			cfg.bind_address = bind_address_;
+			cfg.prepare_transport_address = prepare_transport_address_;
 			cfg.should_stop = [this] { return !running_.load(); };
 			cfg.log = [this](const std::string& msg) {
 				stats_.add_log("[maxcalls] " + msg);

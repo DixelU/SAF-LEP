@@ -25,7 +25,8 @@ class maxcalls_tunnel : public tunnel_interface
 {
 public:
 	maxcalls_tunnel(const std::string& login_token, bool is_transmitter, const std::string& peer_id, encode_scheme scheme,
-		const std::string& bind_address = "");
+		const std::string& bind_address = "",
+		std::function<bool(const std::string&)> prepare_transport_address = {});
 	~maxcalls_tunnel() override;
 
 	void start() override;
@@ -51,6 +52,7 @@ private:
 	std::string peer_id_;
 	encode_scheme scheme_;
 	std::string bind_address_;
+	std::function<bool(const std::string&)> prepare_transport_address_;
 	std::string device_id_;
 
 	std::atomic<bool> running_{false};

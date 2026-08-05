@@ -8,6 +8,8 @@
 #include <functional>
 #include <atomic>
 #include <cstdint>
+#include <mutex>
+#include <unordered_set>
 
 namespace dixelu {
 namespace udp {
@@ -32,11 +34,14 @@ struct setup_state
 	std::string local_gateway_iface;       // (Linux only) e.g. "eth0"
 	bool static_route_added = false;
 
-	// maxcalls transport policy routing (Linux only). Unlike the p2p tunnel the
-	// maxcalls transport has no single fixed server IP to exclude, so instead we
-	// bind its sockets to the physical uplink IP and steer that source out of the
-	// WAN with a policy-routing rule.
+	// maxcalls transport routing. Linux uses a source-policy table. Windows
+	// snapshots the physical route before enabling the VPN and owns temporary
+	// /32 routes for every dynamically discovered transport address.
 	std::string wan_local_ip;              // Source IP of the physical default route
+	std::string maxcalls_wan_gateway_ip;   // Windows physical next hop
+	uint32_t maxcalls_wan_interface_index = 0;
+	mutable std::mutex maxcalls_routes_mutex;
+	std::unordered_set<std::string> maxcalls_routes_added;
 	bool maxcalls_policy_added = false;
 };
 
@@ -56,15 +61,15 @@ std::string detect_wan_interface();
 // physical default route (e.g. "192.168.1.50"). Empty on failure. Linux only.
 std::string detect_wan_local_ip();
 
-// --- maxcalls transport policy routing (Linux only, no-op on Windows) ---
+// --- maxcalls transport routing ---
 //
-// Installs a source-based policy rule so packets sent from state.wan_local_ip
-// bypass the VPN's 0.0.0.0/1 + 128.0.0.0/1 override routes and egress the
-// physical uplink. Pass the same source IP as maxcalls Config.bind_address so
-// the transport's sockets are actually pinned to it. Detects wan_local_ip and
-// the gateway/interface itself; returns false if they can't be determined.
+// Linux installs a source-based policy rule. Windows captures the physical
+// gateway/interface/source and bypasses any public DNS servers needed after the
+// full-tunnel routes are installed. AVTTS then reports each dynamically chosen
+// address through maxcalls_policy_add_transport_address().
 bool maxcalls_policy_setup(setup_state& state);
-void maxcalls_policy_teardown(const setup_state& state);
+bool maxcalls_policy_add_transport_address(setup_state& state, const std::string& address);
+void maxcalls_policy_teardown(setup_state& state);
 
 // --- DNS resolution ---
 
