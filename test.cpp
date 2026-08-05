@@ -38,7 +38,8 @@ void print_usage(const char* program_name)
 	std::cout << "  " << program_name << " -c HOST:PORT -k KEY        # Client" << std::endl;
 
 	std::cout << "\nmaxcalls mode (MAX messenger call tunnel):" << std::endl;
-	std::cout << "  " << program_name << " --max-bootstrap PHONE      # One-time SMS bootstrap configuration" << std::endl;
+	std::cout << "  " << program_name << " --max-qr-bootstrap         # One-time QR bootstrap (recommended)" << std::endl;
+	std::cout << "  " << program_name << " --max-bootstrap PHONE      # SMS bootstrap, with automatic QR fallback" << std::endl;
 	std::cout << "  " << program_name << " --max-wait -k KEY          # Wait for incoming MAX call" << std::endl;
 	std::cout << "  " << program_name << " --max-call PEER -k KEY     # Call peer ID" << std::endl;
 
@@ -57,7 +58,8 @@ void print_usage(const char* program_name)
 	std::cout << "      --ip IP                   VPN IP address (legacy manual mode)" << std::endl;
 	std::cout << "      --mask MASK               VPN Subnet mask (default: 255.255.255.0)" << std::endl;
 	std::cout << "      --gw GATEWAY              VPN Gateway (legacy manual mode)" << std::endl;
-	std::cout << "      --max-bootstrap PHONE     One-time SMS bootstrap configuration (e.g. +79991234567)" << std::endl;
+	std::cout << "      --max-qr-bootstrap        One-time QR bootstrap via the official MAX app" << std::endl;
+	std::cout << "      --max-bootstrap PHONE     SMS bootstrap (e.g. +79991234567); falls back to QR if CAPTCHA is required" << std::endl;
 	std::cout << "      --max-token TOKEN         MAX login token" << std::endl;
 	std::cout << "      --max-call PEER_ID        MAX peer ID to call" << std::endl;
 	std::cout << "      --max-wait                Wait for incoming MAX call" << std::endl;
@@ -291,6 +293,7 @@ int main(int argc, char* argv[])
 
 	bool maxcalls_mode = false;
 	std::string max_phone;
+	bool max_qr_bootstrap = false;
 	std::string max_token;
 	std::string max_call_peer;
 	bool max_wait = false;
@@ -348,6 +351,11 @@ int main(int argc, char* argv[])
 		{
 			if (i + 1 < argc) { max_phone = argv[++i]; maxcalls_mode = true; }
 		}
+		else if (arg == "--max-qr-bootstrap")
+		{
+			max_qr_bootstrap = true;
+			maxcalls_mode = true;
+		}
 		else if (arg == "--max-token")
 		{
 			if (i + 1 < argc) { max_token = argv[++i]; maxcalls_mode = true; }
@@ -386,18 +394,57 @@ int main(int argc, char* argv[])
 	// Validate maxcalls configuration early
 	if (maxcalls_mode)
 	{
-		if (!max_phone.empty())
+		if (!max_phone.empty() || max_qr_bootstrap)
 		{
-			// Run SMS bootstrap and exit
+			// Run one-time authentication bootstrap and exit.
 			try
 			{
-				std::cout << "[maxcalls] Initializing bootstrap for phone: " << max_phone << std::endl;
 				maxcalls::Bootstrap boot;
-				std::string vtoken = boot.request_code(max_phone);
-				std::cout << "[maxcalls] SMS verification code sent. Please enter the code: " << std::flush;
-				std::string code;
-				std::getline(std::cin, code);
-				std::string login = boot.submit_code(vtoken, code);
+				auto qr_login = [&boot]() {
+					return boot.login_with_qr(
+						[](const std::string& link) {
+							std::cout << "[maxcalls] Open this link on a phone with MAX installed, "
+							             "or render it as a QR code and scan it:\n"
+							          << link << "\n[maxcalls] Waiting for approval..." << std::endl;
+						},
+						[](const std::string& hint) {
+							std::cout << "[maxcalls] Enter the account's two-factor password";
+							if (!hint.empty()) std::cout << " (hint: " << hint << ")";
+							std::cout << ": " << std::flush;
+							std::string password;
+							std::getline(std::cin, password);
+							return password;
+						});
+				};
+
+				std::string login;
+				if (max_qr_bootstrap)
+				{
+					std::cout << "[maxcalls] Initializing QR bootstrap" << std::endl;
+					login = qr_login();
+				}
+				else
+				{
+					std::cout << "[maxcalls] Initializing bootstrap for phone: " << max_phone << std::endl;
+					try
+					{
+						std::string vtoken = boot.request_code(max_phone);
+						std::cout << "[maxcalls] SMS verification code sent. Please enter the code: " << std::flush;
+						std::string code;
+						std::getline(std::cin, code);
+						login = boot.submit_code(vtoken, code);
+					}
+					catch (const std::exception& sms_error)
+					{
+						const std::string message = sms_error.what();
+						if (message.find("captcha.validation-failed") == std::string::npos)
+							throw;
+						std::cout << "[maxcalls] MAX requires a web CAPTCHA before SMS. "
+						             "Switching to QR bootstrap." << std::endl;
+						login = qr_login();
+					}
+				}
+
 				std::cout << "\n[maxcalls] Successfully authenticated! Durable Login Token:\n" << login << std::endl;
 				std::cout << "You can set this in the MAXCALLS_TOKEN environment variable or pass via --max-token option." << std::endl;
 				return 0;
@@ -411,7 +458,7 @@ int main(int argc, char* argv[])
 
 		if (max_token.empty())
 		{
-			std::cerr << "Error: maxcalls mode requires a login token. Use --max-bootstrap to get one, or set --max-token / MAXCALLS_TOKEN env variable." << std::endl;
+			std::cerr << "Error: maxcalls mode requires a login token. Use --max-qr-bootstrap (recommended) or --max-bootstrap PHONE to get one, or set --max-token / MAXCALLS_TOKEN env variable." << std::endl;
 			return 1;
 		}
 
