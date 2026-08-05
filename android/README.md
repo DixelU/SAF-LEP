@@ -1,7 +1,7 @@
 # SAF-LEP for Android
 
-This is a complete command-line Android application. Android Studio is not
-required to build it.
+This is a complete Android application that can be built from the command
+line. Android Studio is not required.
 
 The app contains a small Java launcher and `VpnService`, plus the existing
 C++23 tunnel core compiled with the Android NDK. The default APK contains both
@@ -106,6 +106,36 @@ compatibility with existing workflows; the client and server must select the
 same scheme. The native bridge protects the UDP socket from VPN routing, and
 the TUN adapter owns a duplicated file descriptor so shutdown cannot invalidate
 the descriptor managed by Java.
+
+## Launcher settings and status
+
+The launcher persists the server, port, LEP version, VPN addressing, and
+logging settings in the app's private preferences. The seed key can be shown
+while editing and can be remembered or removed independently. Android backup is
+disabled for this app, but a remembered key is still stored locally on the
+device rather than in a hardware-backed secret store.
+
+The VPN address controls correspond to the desktop `--ip`, `--mask`, and
+`--gw` values. Android's `VpnService` does not expose a next-hop gateway for a
+TUN route, so the gateway field controls routing mode: a non-empty value
+captures all IPv4 traffic, while an empty value captures only the configured
+VPN subnet.
+
+The activity status panel survives activity recreation and reports each setup
+stage, the resolved server IP, local UDP port, peer traffic, UDP and TUN byte
+counters, and packets discarded before a peer was available. The notification
+and activity both provide a **Disconnect** action.
+
+Server hostnames are resolved before the catch-all VPN route is installed, and
+the native bridge receives the resulting numeric IPv4 endpoint. This prevents
+the initial DNS lookup from being routed into a tunnel that is not ready yet.
+
+If the panel says **Peer traffic: none yet**, the local TUN and UDP socket are
+running but no datagram has returned from the server. Check that the server is
+listening on UDP, its firewall/NAT exposes the selected port, and both sides use
+the same LEP version and seed key. Rising `TUN->peer` and UDP TX counters with
+zero UDP RX narrow the problem to the server/network path rather than Android's
+VPN interface.
 
 ## Logging
 

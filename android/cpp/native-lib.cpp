@@ -17,6 +17,8 @@
 #include <thread>
 #include <atomic>
 #include <stdexcept>
+#include <mutex>
+#include <sstream>
 
 #include <android/log.h>
 
@@ -36,11 +38,25 @@ namespace
 std::shared_ptr<dixelu::udp::p2p_tunnel> g_tunnel;
 std::unique_ptr<dixelu::udp::vpn_interface> g_vpn;
 std::atomic<bool> g_running{false};
+std::mutex g_error_mutex;
+std::string g_last_error;
 
 // Java VM reference for callbacks
 JavaVM* g_jvm = nullptr;
 jobject g_vpn_service = nullptr;
 jmethodID g_protect_method = nullptr;
+
+void setLastError(const std::string& message)
+{
+	std::lock_guard<std::mutex> lock(g_error_mutex);
+	g_last_error = message;
+}
+
+std::string getLastError()
+{
+	std::lock_guard<std::mutex> lock(g_error_mutex);
+	return g_last_error;
+}
 
 /**
  * Call back to Java to protect a socket from being routed through the VPN.
@@ -140,8 +156,10 @@ Java_com_example_saflep_SafLepVpnService_startNativeVpn(
 	if (g_running.exchange(true))
 	{
 		LOGW("VPN already running");
+		setLastError("Native VPN is already running");
 		return JNI_FALSE;
 	}
+	setLastError("");
 
 	LOGI("Starting native VPN: fd=%d, port=%d", tun_fd, server_port);
 
@@ -155,6 +173,7 @@ Java_com_example_saflep_SafLepVpnService_startNativeVpn(
 	if (!g_protect_method)
 	{
 		LOGE("Failed to find protect() method");
+		setLastError("Android VpnService.protect() is unavailable");
 		env->DeleteGlobalRef(g_vpn_service);
 		g_vpn_service = nullptr;
 		g_running = false;
@@ -201,6 +220,7 @@ Java_com_example_saflep_SafLepVpnService_startNativeVpn(
 		if (!g_vpn->start_android(tun_fd))
 		{
 			LOGE("Failed to start VPN interface");
+			setLastError("Failed to duplicate or start the Android TUN interface");
 			g_tunnel->stop();
 			g_tunnel.reset();
 			g_vpn.reset();
@@ -210,11 +230,14 @@ Java_com_example_saflep_SafLepVpnService_startNativeVpn(
 			return JNI_FALSE;
 		}
 
-		// Connect to the server if IP is provided
+		// Java resolves the host before establishing the catch-all VPN route. Use
+		// the numeric endpoint directly here so no DNS lookup can be trapped in TUN.
 		if (!ip_str.empty() && server_port > 0)
 		{
 			LOGI("Connecting to peer: %s:%d", ip_str.c_str(), server_port);
-			g_tunnel->connect_to_peer(ip_str, std::to_string(server_port));
+			g_tunnel->connect_to_peer(boost::asio::ip::udp::endpoint(
+				boost::asio::ip::make_address_v4(ip_str),
+				static_cast<unsigned short>(server_port)));
 		}
 
 		LOGI("Native VPN started successfully");
@@ -224,6 +247,7 @@ Java_com_example_saflep_SafLepVpnService_startNativeVpn(
 	catch (const std::exception& e)
 	{
 		LOGE("Exception starting VPN: %s", e.what());
+		setLastError(e.what());
 		g_tunnel.reset();
 		g_vpn.reset();
 		env->DeleteGlobalRef(g_vpn_service);
@@ -295,6 +319,41 @@ Java_com_example_saflep_SafLepVpnService_getLocalPort(JNIEnv* env, jobject thiz)
 		return -1;
 
 	return static_cast<jint>(g_tunnel->get_local_endpoint().port());
+}
+
+/**
+ * Return human-readable live transport counters for the activity status panel.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_example_saflep_SafLepVpnService_getNativeStatus(JNIEnv* env, jobject thiz)
+{
+	if (!g_tunnel || !g_running)
+		return env->NewStringUTF("Native tunnel is not running.");
+
+	const auto endpoint = g_tunnel->get_local_endpoint();
+	const auto& stats = g_tunnel->get_stats();
+	const auto received = stats.bytes_received.load();
+	std::ostringstream text;
+	text << "Local UDP: " << endpoint.port() << '\n'
+		 << "Peer traffic: " << (received > 0 ? "received" : "none yet") << '\n'
+		 << "UDP bytes: TX " << stats.bytes_sent.load()
+		 << " / RX " << received << '\n'
+		 << "IP bytes: TUN->peer " << stats.tap_bytes_in.load()
+		 << " / peer->TUN " << stats.tap_bytes_out.load() << '\n'
+		 << "Peers (local state): " << g_tunnel->get_connected_peers().size()
+		 << " / " << g_tunnel->get_peer_count() << '\n'
+		 << "Packets dropped before a peer: " << stats.broadcast_drops.load();
+	return env->NewStringUTF(text.str().c_str());
+}
+
+/**
+ * Return the most recent native initialization failure.
+ */
+JNIEXPORT jstring JNICALL
+Java_com_example_saflep_SafLepVpnService_getNativeLastError(JNIEnv* env, jobject thiz)
+{
+	const auto error = getLastError();
+	return env->NewStringUTF(error.c_str());
 }
 
 /**
