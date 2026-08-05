@@ -54,9 +54,9 @@ void maxcalls_tunnel::start()
 
 void maxcalls_tunnel::stop()
 {
-	if (!running_.exchange(false))
-		return;
+	const bool was_running = running_.exchange(false);
 
+	if (was_running)
 	{
 		std::lock_guard<std::mutex> lock(connection_mutex_);
 		if (connection_)
