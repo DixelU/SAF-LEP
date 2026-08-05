@@ -51,12 +51,14 @@ private:
 	std::string peer_id_;
 	encode_scheme scheme_;
 	std::string bind_address_;
+	std::string device_id_;
 
 	std::atomic<bool> running_{false};
 	std::thread receive_thread_;
 	std::thread cleanup_thread_;
 
 	std::unique_ptr<maxcalls::Client> client_;
+	mutable std::mutex client_mutex_;
 	std::unique_ptr<maxcalls::Connection> connection_;
 	mutable std::mutex connection_mutex_;
 

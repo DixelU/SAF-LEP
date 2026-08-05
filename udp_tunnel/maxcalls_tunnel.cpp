@@ -6,15 +6,50 @@
 #include <iomanip>
 #include <cstring>
 #include <numeric>
+#include <algorithm>
+#include <array>
+#include <random>
+#include <sstream>
 
 namespace dixelu
 {
 namespace udp
 {
 
+namespace
+{
+
+std::string make_device_id()
+{
+	std::array<uint8_t, 16> bytes{};
+	std::random_device rd;
+	for (auto& byte : bytes)
+	{
+		byte = static_cast<uint8_t>(rd());
+	}
+
+	// RFC 4122 version 4 UUID. Keeping it for the lifetime of the tunnel makes
+	// MAX reconnects look like the same device instead of a new login each time.
+	bytes[6] = static_cast<uint8_t>((bytes[6] & 0x0F) | 0x40);
+	bytes[8] = static_cast<uint8_t>((bytes[8] & 0x3F) | 0x80);
+
+	std::ostringstream out;
+	out << std::hex << std::setfill('0');
+	for (size_t i = 0; i < bytes.size(); ++i)
+	{
+		if (i == 4 || i == 6 || i == 8 || i == 10)
+			out << '-';
+		out << std::setw(2) << static_cast<unsigned int>(bytes[i]);
+	}
+	return out.str();
+}
+
+} // namespace
+
 maxcalls_tunnel::maxcalls_tunnel(const std::string& login_token, bool is_transmitter, const std::string& peer_id, encode_scheme scheme,
 	const std::string& bind_address)
-	: login_token_(login_token), is_transmitter_(is_transmitter), peer_id_(peer_id), scheme_(scheme), bind_address_(bind_address)
+	: login_token_(login_token), is_transmitter_(is_transmitter), peer_id_(peer_id), scheme_(scheme), bind_address_(bind_address),
+	  device_id_(make_device_id())
 {
 	dummy_endpoint_ = boost::asio::ip::udp::endpoint(boost::asio::ip::make_address("127.0.0.1"), 0);
 }
@@ -58,10 +93,19 @@ void maxcalls_tunnel::stop()
 
 	if (was_running)
 	{
-		std::lock_guard<std::mutex> lock(connection_mutex_);
-		if (connection_)
 		{
-			connection_->close();
+			std::lock_guard<std::mutex> lock(connection_mutex_);
+			if (connection_)
+			{
+				connection_->close();
+			}
+		}
+		{
+			std::lock_guard<std::mutex> lock(client_mutex_);
+			if (client_)
+			{
+				client_->close();
+			}
 		}
 	}
 
@@ -74,77 +118,136 @@ void maxcalls_tunnel::stop()
 
 void maxcalls_tunnel::run_receive_loop()
 {
-	try
+	unsigned int retry_delay_seconds = 2;
+
+	while (running_)
 	{
-		maxcalls::Config cfg;
-		cfg.login_token = login_token_;
-		cfg.bind_address = bind_address_;
-		cfg.should_stop = [this] { return !running_.load(); };
-		cfg.log = [this](const std::string& msg) {
-			stats_.add_log("[maxcalls] " + msg);
-			if (VERBOSE_MODE)
-			{
-				std::cout << "[maxcalls] " << msg << std::endl;
-			}
-		};
-
-		stats_.add_log("[Tunnel] Initializing maxcalls client...");
-		client_ = std::make_unique<maxcalls::Client>(cfg);
-		stats_.add_log("[Tunnel] Client initialized. External user ID: " + client_->external_user_id());
-		std::cout << "[Tunnel] maxcalls external ID: " << client_->external_user_id() << std::endl;
-
-		maxcalls::Connection conn = [this]() {
-			if (is_transmitter_)
-			{
-				stats_.add_log("[Tunnel] Waiting for call...");
-				std::cout << "[Tunnel] Waiting for incoming maxcalls call..." << std::endl;
-				return client_->wait_for_call();
-			}
-			else
-			{
-				stats_.add_log("[Tunnel] Calling peer " + peer_id_ + "...");
-				std::cout << "[Tunnel] Calling maxcalls peer: " << peer_id_ << "..." << std::endl;
-				return client_->call(peer_id_);
-			}
-		}();
-
+		bool connection_was_established = false;
+		try
 		{
-			std::lock_guard<std::mutex> lock(connection_mutex_);
-			connection_ = std::make_unique<maxcalls::Connection>(std::move(conn));
-		}
+			maxcalls::Config cfg;
+			cfg.login_token = login_token_;
+			cfg.device_id = device_id_;
+			cfg.bind_address = bind_address_;
+			cfg.should_stop = [this] { return !running_.load(); };
+			cfg.log = [this](const std::string& msg) {
+				stats_.add_log("[maxcalls] " + msg);
+				if (VERBOSE_MODE)
+				{
+					std::cout << "[maxcalls] " << msg << std::endl;
+				}
+			};
 
-		stats_.add_log("[Tunnel] Connection established!");
-		std::cout << "[Tunnel] maxcalls connection established!" << std::endl;
-
-		std::vector<uint8_t> buffer(65535);
-		while (running_)
-		{
-			size_t n = 0;
+			stats_.add_log("[Tunnel] Initializing maxcalls client...");
+			auto new_client = std::make_unique<maxcalls::Client>(cfg);
+			if (!running_)
 			{
-				std::lock_guard<std::mutex> lock(connection_mutex_);
-				if (!connection_ || !connection_->is_open())
-					break;
-			}
-			
-			// Blocking read
-			n = connection_->read(buffer.data(), buffer.size());
-			if (n == 0)
-			{
-				stats_.add_log("[Tunnel] Connection closed by peer.");
-				std::cout << "[Tunnel] maxcalls connection closed by peer." << std::endl;
+				new_client->close();
 				break;
 			}
 
-			process_incoming_datagram(buffer.data(), n);
+			maxcalls::Client* active_client = nullptr;
+			{
+				std::lock_guard<std::mutex> lock(client_mutex_);
+				client_ = std::move(new_client);
+				active_client = client_.get();
+			}
+
+			stats_.add_log("[Tunnel] Client initialized. External user ID: " + active_client->external_user_id());
+			std::cout << "[Tunnel] maxcalls external ID: " << active_client->external_user_id() << std::endl;
+
+			maxcalls::Connection conn = [this, active_client]() {
+				if (is_transmitter_)
+				{
+					stats_.add_log("[Tunnel] Waiting for call...");
+					std::cout << "[Tunnel] Waiting for incoming maxcalls call..." << std::endl;
+					return active_client->wait_for_call();
+				}
+				else
+				{
+					stats_.add_log("[Tunnel] Calling peer " + peer_id_ + "...");
+					std::cout << "[Tunnel] Calling maxcalls peer: " << peer_id_ << "..." << std::endl;
+					return active_client->call(peer_id_);
+				}
+			}();
+
+			if (!running_)
+			{
+				conn.close();
+				break;
+			}
+
+			{
+				std::lock_guard<std::mutex> lock(connection_mutex_);
+				connection_ = std::make_unique<maxcalls::Connection>(std::move(conn));
+			}
+
+			connection_was_established = true;
+			retry_delay_seconds = 2;
+			stats_.add_log("[Tunnel] Connection established!");
+			std::cout << "[Tunnel] maxcalls connection established!" << std::endl;
+
+			std::vector<uint8_t> buffer(65535);
+			while (running_)
+			{
+				maxcalls::Connection* active_connection = nullptr;
+				{
+					std::lock_guard<std::mutex> lock(connection_mutex_);
+					if (!connection_ || !connection_->is_open())
+						break;
+					active_connection = connection_.get();
+				}
+
+				// Blocking read. stop() closes this connection to wake the read.
+				const size_t n = active_connection->read(buffer.data(), buffer.size());
+				if (n == 0)
+				{
+					stats_.add_log("[Tunnel] Connection closed by peer.");
+					std::cout << "[Tunnel] maxcalls connection closed by peer." << std::endl;
+					break;
+				}
+
+				process_incoming_datagram(buffer.data(), n);
+			}
 		}
-	}
-	catch (const std::exception& e)
-	{
-		if (running_)
+		catch (const std::exception& e)
 		{
-			stats_.add_log("[Tunnel] Fatal error in receive loop: " + std::string(e.what()));
-			std::cerr << "[Tunnel] maxcalls fatal error: " << e.what() << std::endl;
+			if (running_)
+			{
+				stats_.add_log("[Tunnel] maxcalls session error: " + std::string(e.what()));
+				std::cerr << "[Tunnel] maxcalls session error: " << e.what() << std::endl;
+			}
 		}
+
+		std::unique_ptr<maxcalls::Connection> old_connection;
+		{
+			std::lock_guard<std::mutex> lock(connection_mutex_);
+			old_connection = std::move(connection_);
+		}
+		if (old_connection)
+			old_connection->close();
+
+		std::unique_ptr<maxcalls::Client> old_client;
+		{
+			std::lock_guard<std::mutex> lock(client_mutex_);
+			old_client = std::move(client_);
+		}
+		if (old_client)
+			old_client->close();
+
+		if (!running_)
+			break;
+
+		const unsigned int delay = retry_delay_seconds;
+		stats_.add_log("[Tunnel] Reconnecting maxcalls in " + std::to_string(delay) + "s...");
+		std::cerr << "[Tunnel] Reconnecting maxcalls in " << delay << "s..." << std::endl;
+		for (unsigned int elapsed_tenths = 0; running_ && elapsed_tenths < delay * 10; ++elapsed_tenths)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		}
+
+		if (!connection_was_established)
+			retry_delay_seconds = (std::min)(retry_delay_seconds * 2, 16u);
 	}
 
 	running_ = false;
