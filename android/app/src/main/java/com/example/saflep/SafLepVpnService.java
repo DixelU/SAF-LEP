@@ -35,9 +35,17 @@ public final class SafLepVpnService extends VpnService {
     public static final String EXTRA_VPN_GATEWAY = "vpn_gateway";
     public static final String EXTRA_MTU = "mtu";
 
+    public enum ConnectionState {
+        DISCONNECTED,
+        STARTING,
+        CONNECTED,
+        STOPPING,
+        FAILED
+    }
+
     private static volatile String statusSummary =
             "Disconnected\nNo active tunnel.";
-    private static volatile boolean activeOrStarting = false;
+    private static volatile ConnectionState connectionState = ConnectionState.DISCONNECTED;
 
     static {
         System.loadLibrary("saf-lep");
@@ -49,8 +57,12 @@ public final class SafLepVpnService extends VpnService {
     private final Runnable statusReporter = new Runnable() {
         @Override
         public void run() {
-            if (!isVpnRunning()) return;
-            publishStatus("Tunnel active", runningConfiguration + "\n" + getNativeStatus(), true);
+            if (!isVpnRunning() || stopRequested) return;
+            publishStatus(
+                    "Tunnel active",
+                    runningConfiguration + "\n" + getNativeStatus(),
+                    ConnectionState.CONNECTED
+            );
             updateNotification("Tunnel active");
             statusHandler.postDelayed(this, 1000);
         }
@@ -58,9 +70,11 @@ public final class SafLepVpnService extends VpnService {
 
     private ParcelFileDescriptor tunInterface;
     private Thread startupThread;
+    private Thread shutdownThread;
     private volatile boolean stopRequested;
-    private volatile boolean startupFailed;
     private volatile String runningConfiguration = "";
+    private long lifecycleGeneration;
+    private int latestStartId;
 
     private native boolean startNativeVpn(
             int fd,
@@ -82,7 +96,13 @@ public final class SafLepVpnService extends VpnService {
     }
 
     public static boolean isActiveOrStarting() {
-        return activeOrStarting;
+        return connectionState == ConnectionState.STARTING
+                || connectionState == ConnectionState.CONNECTED
+                || connectionState == ConnectionState.STOPPING;
+    }
+
+    public static ConnectionState getConnectionState() {
+        return connectionState;
     }
 
     @Override
@@ -94,28 +114,45 @@ public final class SafLepVpnService extends VpnService {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) return START_NOT_STICKY;
+        latestStartId = startId;
 
         if (ACTION_STOP.equals(intent.getAction())) {
-            publishStatus("Stopping tunnel", "Closing the VPN interface and UDP transport...", true);
-            stopRequested = true;
-            stopSelf();
+            beginShutdown(
+                    "Disconnected",
+                    "No active tunnel.",
+                    ConnectionState.DISCONNECTED,
+                    startId,
+                    true
+            );
             return START_NOT_STICKY;
         }
 
+        // Android can start a VpnService itself, notably when always-on VPN is
+        // configured. A tunnel must only be created by an explicit user action;
+        // otherwise a manual disconnect can look like an immediate reconnect.
+        if (!ACTION_START.equals(intent.getAction())) {
+            Log.w(TAG, "Ignoring non-user VPN start action: " + intent.getAction());
+            stopSelfResult(startId);
+            return START_NOT_STICKY;
+        }
+
+        final long generation;
         synchronized (lifecycleLock) {
-            if (isVpnRunning() || (startupThread != null && startupThread.isAlive())) {
+            if (isVpnRunning()
+                    || (startupThread != null && startupThread.isAlive())
+                    || (shutdownThread != null && shutdownThread.isAlive())) {
                 Log.w(TAG, "Ignoring duplicate VPN start");
                 publishStatus(
                         "Tunnel already active",
                         runningConfiguration.isEmpty()
                                 ? "A connection attempt is already in progress."
                                 : runningConfiguration,
-                        true
+                        connectionState
                 );
                 return START_NOT_STICKY;
             }
             stopRequested = false;
-            startupFailed = false;
+            generation = ++lifecycleGeneration;
         }
 
         startForeground(NOTIFICATION_ID, createNotification("Preparing tunnel..."));
@@ -133,21 +170,31 @@ public final class SafLepVpnService extends VpnService {
         publishStatus(
                 "Resolving server",
                 serverHost + ":" + serverPort + "\nDNS is resolved before the VPN route is installed.",
-                true
+                ConnectionState.STARTING
         );
 
         startupThread = new Thread(
-                () -> startTunnel(
-                        serverHost,
-                        serverPort,
-                        seedKey,
-                        encodingScheme,
-                        verbose,
-                        vpnAddress,
-                        vpnPrefix,
-                        vpnGateway,
-                        mtu
-                ),
+                () -> {
+                    try {
+                        startTunnel(
+                                generation,
+                                startId,
+                                serverHost,
+                                serverPort,
+                                seedKey,
+                                encodingScheme,
+                                verbose,
+                                vpnAddress,
+                                vpnPrefix,
+                                vpnGateway,
+                                mtu
+                        );
+                    } finally {
+                        synchronized (lifecycleLock) {
+                            if (Thread.currentThread() == startupThread) startupThread = null;
+                        }
+                    }
+                },
                 "saf-lep-start"
         );
         startupThread.start();
@@ -155,6 +202,8 @@ public final class SafLepVpnService extends VpnService {
     }
 
     private void startTunnel(
+            long generation,
+            int startId,
             String serverHost,
             int serverPort,
             String seedKey,
@@ -177,7 +226,7 @@ public final class SafLepVpnService extends VpnService {
             }
 
             String resolvedServerIp = resolveIpv4(serverHost);
-            if (stopRequested) return;
+            if (!isCurrentGeneration(generation)) return;
 
             String protocol = encodingScheme == 1 ? "LEP v1" : "LEP v0";
             String routeMode = vpnGateway.isEmpty()
@@ -195,7 +244,11 @@ public final class SafLepVpnService extends VpnService {
                     vpnPrefix,
                     routeMode
             );
-            publishStatus("Establishing VPN interface", runningConfiguration, true);
+            publishStatus(
+                    "Establishing VPN interface",
+                    runningConfiguration,
+                    ConnectionState.STARTING
+            );
             updateNotification("Establishing VPN interface...");
 
             Builder builder = new Builder()
@@ -216,7 +269,7 @@ public final class SafLepVpnService extends VpnService {
             }
 
             synchronized (lifecycleLock) {
-                if (stopRequested) {
+                if (!isCurrentGenerationLocked(generation)) {
                     established.close();
                     return;
                 }
@@ -226,12 +279,13 @@ public final class SafLepVpnService extends VpnService {
             publishStatus(
                     "Starting native tunnel",
                     runningConfiguration + "\nProtecting the UDP socket from the VPN route...",
-                    true
+                    ConnectionState.STARTING
             );
 
             boolean success;
             String nativeError = "";
             synchronized (nativeLifecycleLock) {
+                if (!isCurrentGeneration(generation)) return;
                 success = startNativeVpn(
                         established.getFd(),
                         resolvedServerIp,
@@ -240,7 +294,7 @@ public final class SafLepVpnService extends VpnService {
                         encodingScheme,
                         verbose
                 );
-                if (success && stopRequested) {
+                if (success && !isCurrentGeneration(generation)) {
                     stopNativeVpn();
                     return;
                 }
@@ -249,7 +303,7 @@ public final class SafLepVpnService extends VpnService {
                     publishStatus(
                             "Tunnel active",
                             runningConfiguration + "\n" + getNativeStatus(),
-                            true
+                            ConnectionState.CONNECTED
                     );
                     updateNotification("Tunnel active");
                     statusHandler.removeCallbacks(statusReporter);
@@ -264,27 +318,94 @@ public final class SafLepVpnService extends VpnService {
                         : nativeError);
             }
         } catch (Exception error) {
-            if (stopRequested) return;
-            startupFailed = true;
+            if (!isCurrentGeneration(generation)) return;
             String message = error.getMessage() == null
                     ? error.getClass().getSimpleName()
                     : error.getMessage();
             Log.e(TAG, "Failed to start VPN", error);
+            String details =
+                    message + "\nCheck the server address/port, LEP version, seed key, and server firewall.";
             publishStatus(
                     "Connection failed",
-                    message + "\nCheck the server address/port, LEP version, seed key, and server firewall.",
-                    false
+                    details,
+                    ConnectionState.FAILED
             );
             updateNotification("Connection failed");
-            stopSelf();
+            beginShutdown(
+                    "Connection failed",
+                    details,
+                    ConnectionState.FAILED,
+                    startId,
+                    false
+            );
         }
     }
 
     @Override
     public void onDestroy() {
         stopRequested = true;
+        synchronized (lifecycleLock) {
+            ++lifecycleGeneration;
+        }
         statusHandler.removeCallbacks(statusReporter);
+        tearDownTunnel();
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        if (connectionState != ConnectionState.FAILED
+                && connectionState != ConnectionState.DISCONNECTED) {
+            publishStatus(
+                    "Disconnected",
+                    "The VPN service was stopped by Android.",
+                    ConnectionState.DISCONNECTED
+            );
+        }
+        super.onDestroy();
+    }
 
+    @Override
+    public void onRevoke() {
+        beginShutdown(
+                "VPN permission revoked",
+                "Android revoked the VPN interface.",
+                ConnectionState.DISCONNECTED,
+                latestStartId,
+                false
+        );
+    }
+
+    private void beginShutdown(
+            String finalTitle,
+            String finalDetails,
+            ConnectionState finalState,
+            int startId,
+            boolean announceStopping
+    ) {
+        synchronized (lifecycleLock) {
+            if (shutdownThread != null && shutdownThread.isAlive()) return;
+            stopRequested = true;
+            ++lifecycleGeneration;
+            if (announceStopping) {
+                publishStatus(
+                        "Stopping tunnel",
+                        "Closing the VPN interface and UDP transport...",
+                        ConnectionState.STOPPING
+                );
+            }
+            shutdownThread = new Thread(() -> {
+                statusHandler.removeCallbacks(statusReporter);
+                tearDownTunnel();
+                stopForeground(STOP_FOREGROUND_REMOVE);
+                publishStatus(finalTitle, finalDetails, finalState);
+                if (startId > 0) stopSelfResult(startId);
+                else stopSelf();
+                synchronized (lifecycleLock) {
+                    if (Thread.currentThread() == shutdownThread) shutdownThread = null;
+                }
+            }, "saf-lep-stop");
+            shutdownThread.start();
+        }
+    }
+
+    private void tearDownTunnel() {
         synchronized (nativeLifecycleLock) {
             if (isVpnRunning()) stopNativeVpn();
         }
@@ -299,20 +420,16 @@ public final class SafLepVpnService extends VpnService {
         } catch (IOException error) {
             Log.e(TAG, "Error closing VPN interface", error);
         }
-
-        stopForeground(STOP_FOREGROUND_REMOVE);
-        if (!startupFailed) {
-            publishStatus("Disconnected", "No active tunnel.", false);
-        } else {
-            activeOrStarting = false;
-        }
-        super.onDestroy();
     }
 
-    @Override
-    public void onRevoke() {
-        publishStatus("VPN permission revoked", "Android revoked the VPN interface.", false);
-        stopSelf();
+    private boolean isCurrentGeneration(long generation) {
+        synchronized (lifecycleLock) {
+            return isCurrentGenerationLocked(generation);
+        }
+    }
+
+    private boolean isCurrentGenerationLocked(long generation) {
+        return !stopRequested && lifecycleGeneration == generation;
     }
 
     private String resolveIpv4(String host) throws IOException {
@@ -339,9 +456,13 @@ public final class SafLepVpnService extends VpnService {
         );
     }
 
-    private static void publishStatus(String title, String details, boolean active) {
+    private static void publishStatus(
+            String title,
+            String details,
+            ConnectionState state
+    ) {
         statusSummary = title + "\n" + details;
-        activeOrStarting = active;
+        connectionState = state;
     }
 
     private void createNotificationChannel() {
@@ -381,7 +502,7 @@ public final class SafLepVpnService extends VpnService {
         return builder
                 .setContentTitle("SAF-LEP VPN")
                 .setContentText(status)
-                .setSmallIcon(android.R.drawable.stat_sys_warning)
+                .setSmallIcon(R.drawable.ic_notification)
                 .setContentIntent(contentIntent)
                 .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Disconnect", stopPendingIntent)
                 .setOngoing(true)
