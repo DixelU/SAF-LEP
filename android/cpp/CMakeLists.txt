@@ -1,164 +1,89 @@
-# CMakeLists.txt for SAF-LEP Android Native Library
-#
-# This file configures the native C++ build for Android using the NDK.
-# It should be referenced from your Android Studio project's build.gradle:
-#
-#   android {
-#       externalNativeBuild {
-#           cmake {
-#               path "src/main/cpp/CMakeLists.txt"
-#               version "3.22.1"
-#           }
-#       }
-#   }
-#
-# PREREQUISITES:
-# 1. Boost compiled for Android (arm64-v8a, armeabi-v7a, x86_64)
-#    Recommended tool: https://github.com/moritz-wundke/Boost-for-Android
-# 2. Set BOOST_ROOT environment variable or edit paths below
-
 cmake_minimum_required(VERSION 3.22.1)
 
-project("saf-lep")
+project(saf-lep LANGUAGES CXX)
 
-# C++ Standard
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Enable debugging symbols in Debug builds
-set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
+set(SAF_LEP_BOOST_ROOT "" CACHE PATH "Boost root or include directory")
+option(SAF_LEP_FETCH_BOOST "Download pinned Boost headers when none are installed" ON)
 
-# ============================================================================
-# Boost Configuration
-# ============================================================================
-# Option 1: Set via environment variable
-# Option 2: Edit these paths to match your Boost installation
+if(NOT SAF_LEP_BOOST_ROOT AND DEFINED ENV{BOOST_ROOT})
+    set(SAF_LEP_BOOST_ROOT "$ENV{BOOST_ROOT}")
+endif()
 
-# Expected structure:
-#   ${BOOST_ROOT}/
-#   ├── include/
-#   │   └── boost/
-#   └── lib/
-#       ├── arm64-v8a/
-#       │   ├── libboost_system.a
-#       │   └── libboost_thread.a
-#       ├── armeabi-v7a/
-#       │   └── ...
-#       └── x86_64/
-#           └── ...
-
-if(DEFINED ENV{BOOST_ROOT})
-    set(BOOST_ROOT $ENV{BOOST_ROOT})
+if(SAF_LEP_BOOST_ROOT)
+    find_path(
+        SAF_LEP_BOOST_INCLUDE_DIR
+        boost/asio.hpp
+        HINTS "${SAF_LEP_BOOST_ROOT}" "${SAF_LEP_BOOST_ROOT}/include"
+        NO_DEFAULT_PATH
+        NO_CMAKE_FIND_ROOT_PATH
+    )
 else()
-    # Default path - adjust as needed
-    set(BOOST_ROOT ${CMAKE_SOURCE_DIR}/../libs/boost)
+    find_path(SAF_LEP_BOOST_INCLUDE_DIR boost/asio.hpp)
 endif()
 
-message(STATUS "BOOST_ROOT: ${BOOST_ROOT}")
-message(STATUS "Android ABI: ${ANDROID_ABI}")
-
-# Boost include directory
-set(BOOST_INCLUDE_DIR ${BOOST_ROOT}/include)
-if(NOT EXISTS ${BOOST_INCLUDE_DIR})
-    message(WARNING "Boost include directory not found: ${BOOST_INCLUDE_DIR}")
-    message(WARNING "Please compile Boost for Android and set BOOST_ROOT")
+if(NOT SAF_LEP_BOOST_INCLUDE_DIR AND SAF_LEP_FETCH_BOOST)
+    include(FetchContent)
+    set(FETCHCONTENT_BASE_DIR "${CMAKE_CURRENT_LIST_DIR}/../.deps" CACHE PATH "Shared Android dependencies")
+    FetchContent_Declare(
+        saf_lep_boost
+        URL https://archives.boost.io/release/1.87.0/source/boost_1_87_0.tar.gz
+        URL_HASH SHA256=f55c340aa49763b1925ccf02b2e83f35fdcf634c9d5164a2acb87540173c741d
+    )
+    FetchContent_GetProperties(saf_lep_boost)
+    if(NOT saf_lep_boost_POPULATED)
+        FetchContent_Populate(saf_lep_boost)
+    endif()
+    set(SAF_LEP_BOOST_INCLUDE_DIR "${saf_lep_boost_SOURCE_DIR}")
 endif()
 
-# Boost libraries for current ABI
-set(BOOST_LIB_DIR ${BOOST_ROOT}/lib/${ANDROID_ABI})
-if(NOT EXISTS ${BOOST_LIB_DIR})
-    message(WARNING "Boost library directory not found: ${BOOST_LIB_DIR}")
+if(NOT EXISTS "${SAF_LEP_BOOST_INCLUDE_DIR}/boost/asio.hpp")
+    message(FATAL_ERROR
+        "Boost headers were not found. Set BOOST_ROOT or SAF_LEP_BOOST_ROOT, "
+        "or configure with SAF_LEP_FETCH_BOOST=ON."
+    )
 endif()
 
-# ============================================================================
-# Source Files
-# ============================================================================
+set(SAF_LEP_ROOT "${CMAKE_CURRENT_LIST_DIR}/../..")
 
-# Path to core SAF-LEP source files (relative to this CMakeLists.txt)
-set(CORE_SRC_DIR ${CMAKE_SOURCE_DIR}/../../)
-
-set(SOURCES
-    # JNI Bridge
+add_library(
+    saf-lep
+    SHARED
     native-lib.cpp
-
-    # Core tunnel implementation
-    ${CORE_SRC_DIR}/udp_tunnel/tunnel.cpp
-
-    # Android TUN adapter
-    ${CORE_SRC_DIR}/udp_tunnel/android_tun.cpp
+    "${SAF_LEP_ROOT}/udp_tunnel/tunnel.cpp"
+    "${SAF_LEP_ROOT}/udp_tunnel/android_tun.cpp"
 )
 
-# ============================================================================
-# Library Definition
-# ============================================================================
-
-add_library(saf-lep SHARED ${SOURCES})
-
-# Include directories
-target_include_directories(saf-lep PRIVATE
-    ${BOOST_INCLUDE_DIR}
-    ${CORE_SRC_DIR}
+target_include_directories(
+    saf-lep
+    PRIVATE
+    "${SAF_LEP_BOOST_INCLUDE_DIR}"
+    "${SAF_LEP_ROOT}"
 )
 
-# ============================================================================
-# Find Libraries
-# ============================================================================
-
-# Android log library (for __android_log_print)
-find_library(log-lib log)
-
-# ============================================================================
-# Link Libraries
-# ============================================================================
-
-# Import Boost libraries as static libraries
-if(EXISTS ${BOOST_LIB_DIR}/libboost_system.a)
-    add_library(boost_system STATIC IMPORTED)
-    set_target_properties(boost_system PROPERTIES
-        IMPORTED_LOCATION ${BOOST_LIB_DIR}/libboost_system.a
-    )
-else()
-    message(WARNING "libboost_system.a not found in ${BOOST_LIB_DIR}")
-endif()
-
-if(EXISTS ${BOOST_LIB_DIR}/libboost_thread.a)
-    add_library(boost_thread STATIC IMPORTED)
-    set_target_properties(boost_thread PROPERTIES
-        IMPORTED_LOCATION ${BOOST_LIB_DIR}/libboost_thread.a
-    )
-endif()
-
-target_link_libraries(saf-lep
-    # Android system libraries
-    ${log-lib}
-    atomic
-
-    # Boost (if found)
-    $<TARGET_NAME_IF_EXISTS:boost_system>
-    $<TARGET_NAME_IF_EXISTS:boost_thread>
-)
-
-# ============================================================================
-# Compiler Flags
-# ============================================================================
-
-target_compile_options(saf-lep PRIVATE
-    -Wall
-    -Wextra
-    -Wno-unused-parameter  # Boost headers have unused parameters
-)
-
-# Define Android macro (should be auto-defined by NDK, but be explicit)
-target_compile_definitions(saf-lep PRIVATE
-    __ANDROID__
+target_compile_definitions(
+    saf-lep
+    PRIVATE
     BOOST_ASIO_NO_DEPRECATED
 )
 
-# ============================================================================
-# Installation (for standalone builds outside Android Studio)
-# ============================================================================
+target_compile_options(
+    saf-lep
+    PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+    -Wno-unused-parameter
+)
 
-# Install the shared library
-install(TARGETS saf-lep
-    LIBRARY DESTINATION lib/${ANDROID_ABI}
+find_library(ANDROID_LOG_LIBRARY log REQUIRED)
+
+target_link_libraries(
+    saf-lep
+    PRIVATE
+    "${ANDROID_LOG_LIBRARY}"
+    atomic
 )

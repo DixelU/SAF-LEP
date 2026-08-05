@@ -123,7 +123,7 @@ constexpr std::vector<uint8_t> put_lep(lep_v0_encoder_state &state, const uint8_
 
 	encoded_data[2] = (state.index >> 8) & 0xFF;
 	encoded_data[3] = state.index & 0xFF;
-	encoded_data[8] = (state.index >> 16) & 0xFF ^ encoded_data[2];
+	encoded_data[8] = ((state.index >> 16) & 0xFF) ^ encoded_data[2];
 	encoded_data[9] = ((state.index >> 24) & 0xFF) ^ encoded_data[3] ^ encoded_data[2];
 	state.index++;
 

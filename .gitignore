@@ -1,6 +1,10 @@
 .vscode
 .idea
-*build*
+build/
+.gradle/
+.cxx/
+.deps/
+local.properties
 .vs
 SAF-LEP-ExPuN/*
 x64/*

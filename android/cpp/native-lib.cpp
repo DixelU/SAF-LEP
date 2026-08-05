@@ -16,6 +16,7 @@
 #include <memory>
 #include <thread>
 #include <atomic>
+#include <stdexcept>
 
 #include <android/log.h>
 
@@ -84,9 +85,10 @@ bool protectSocket(int socketFd)
 	if (attached)
 		g_jvm->DetachCurrentThread();
 
-		return result == JNI_TRUE;
-	}
+	return result == JNI_TRUE;
 }
+
+} // namespace
 
 extern "C"
 {
@@ -119,6 +121,7 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved)
  * @param server_ip The server IP address to connect to
  * @param server_port The server port
  * @param seed_key The encryption seed key (empty string for no encryption)
+ * @param encoding_scheme LEP encoding scheme (0=v0, 1=v1)
  * @param verbose Enable verbose logging
  * @return true if started successfully
  */
@@ -130,6 +133,7 @@ Java_com_example_saflep_SafLepVpnService_startNativeVpn(
 	jstring server_ip,
 	jint server_port,
 	jstring seed_key,
+	jint encoding_scheme,
 	jboolean verbose)
 {
 
@@ -169,7 +173,15 @@ Java_com_example_saflep_SafLepVpnService_startNativeVpn(
 	{
 		// Create the P2P tunnel
 		// Use port 0 to let the OS assign a port
-		g_tunnel = std::make_shared<dixelu::udp::p2p_tunnel>(0);
+		const auto scheme = encoding_scheme == 1
+			? dixelu::udp::encode_scheme::lep_v1
+			: dixelu::udp::encode_scheme::lep_v0;
+		g_tunnel = std::make_shared<dixelu::udp::p2p_tunnel>(0, scheme);
+		const int socket_fd = g_tunnel->get_socket_fd();
+		if (socket_fd < 0 || !protectSocket(socket_fd))
+		{
+			throw std::runtime_error("Failed to protect the tunnel UDP socket");
+		}
 
 		// Set encryption key if provided
 		if (!key_str.empty())

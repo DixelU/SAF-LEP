@@ -1043,6 +1043,13 @@ boost::asio::ip::udp::endpoint p2p_tunnel::get_local_endpoint() const
 	return local_endpoint_;
 }
 
+#if defined(__ANDROID__)
+int p2p_tunnel::get_socket_fd()
+{
+	return socket_.is_open() ? socket_.native_handle() : -1;
+}
+#endif
+
 void p2p_tunnel::set_packet_received_callback(packet_received_callback cb)
 {
 	packet_callback_ = std::move(cb);
@@ -1256,9 +1263,18 @@ void vpn_interface::stop()
 	if (!running_.exchange(false))
 		return;
 
+	#if defined(__ANDROID__)
+	// Wake the poll/read loop before destroying the adapter it references.
+	tun_adapter_->close_fd();
+	#endif
+
 	if (read_thread_.joinable())
 	{
-		read_thread_.detach(); 
+		#if defined(__ANDROID__)
+		read_thread_.join();
+		#else
+		read_thread_.detach();
+		#endif
 	}
 }
 

@@ -218,6 +218,10 @@ public:
 	// Get local endpoint
 	boost::asio::ip::udp::endpoint get_local_endpoint() const;
 
+#if defined(__ANDROID__)
+	int get_socket_fd();
+#endif
+
 	// Set callbacks
 	void set_packet_received_callback(packet_received_callback cb) override;
 	void set_connection_callback(connection_callback cb);

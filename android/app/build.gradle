@@ -1,0 +1,53 @@
+apply plugin: 'com.android.application'
+
+def safLepAbis = providers.gradleProperty('safLepAbis')
+        .orElse('arm64-v8a,x86_64')
+        .get()
+        .split(',')
+
+android {
+    namespace 'com.example.saflep'
+    compileSdk 36
+    ndkVersion '27.0.12077973'
+    enableKotlin false
+
+    defaultConfig {
+        applicationId 'com.example.saflep'
+        minSdk 24
+        targetSdk 36
+        versionCode 1
+        versionName '0.1.0'
+
+        ndk {
+            abiFilters(*safLepAbis)
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags '-std=c++23'
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            debuggable true
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('../cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+}
