@@ -492,6 +492,19 @@ int main(int argc, char* argv[])
 #endif
 			}
 		}
+
+#ifdef _WIN32
+		// MAX signaling and ICE must stay on the physical connection. Windows
+		// has no source-policy routing equivalent to the Linux implementation,
+		// so a caller-supplied legacy gateway must not install full-tunnel /1
+		// routes and recursively capture the MAX transport itself.
+		if (!vpn_gw.empty())
+		{
+			std::cout << "[maxcalls] Ignoring --gw on Windows; maxcalls requires "
+			             "split-tunnel routing (only the configured VPN subnet)." << std::endl;
+			vpn_gw.clear();
+		}
+#endif
 	}
 
 	// ---------------------------------------------------------------
@@ -646,15 +659,9 @@ int main(int argc, char* argv[])
 			});
 		}
 
-		// Start tunnel
-		tunnel->start();
-		
-		if (!maxcalls_mode)
-		{
-			std::static_pointer_cast<p2p_tunnel>(tunnel)->run_in_thread();
-		}
-
-		// Start VPN interface
+		// Configure the VPN interface before starting the transport. On Windows
+		// this also removes stale full-tunnel routes from the selected TAP before
+		// maxcalls performs its first DNS lookup.
 		std::cout << "[VPN] Starting VPN interface on " << vpn_ip << "..." << std::endl;
 		if (!vpn->start(vpn_ip, vpn_mask, vpn_gw))
 		{
@@ -665,6 +672,14 @@ int main(int argc, char* argv[])
 			else if (mode == run_mode::client) client_teardown(auto_state);
 			maxcalls_policy_teardown(auto_state);
 			return 1;
+		}
+
+		// Start tunnel
+		tunnel->start();
+
+		if (!maxcalls_mode)
+		{
+			std::static_pointer_cast<p2p_tunnel>(tunnel)->run_in_thread();
 		}
 
 		if (!maxcalls_mode)

@@ -49,6 +49,7 @@ private:
 	std::string adapter_name_;
 	std::string adapter_guid_;
 
+	void remove_full_tunnel_routes();
 	std::string get_device_guid(const std::string& adapter_name);
 	std::vector<std::pair<std::string, std::string>> get_all_tap_adapters();
 };

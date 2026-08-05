@@ -46,8 +46,23 @@ TapAdapter::~TapAdapter()
 {
 	if (handle_ != INVALID_HANDLE_VALUE)
 	{
+		remove_full_tunnel_routes();
 		CloseHandle(handle_);
 	}
+}
+
+void TapAdapter::remove_full_tunnel_routes()
+{
+	const uint32_t if_index = get_interface_index();
+	if (if_index == 0)
+		return;
+
+	// Remove only the two default-override routes attached to this TAP.
+	// A previous interrupted run can otherwise leave DNS and the MAX control
+	// connection routed into an unestablished tunnel on the next startup.
+	const std::string if_arg = " IF " + std::to_string(if_index);
+	system(("route delete 0.0.0.0 mask 128.0.0.0" + if_arg + " >NUL 2>&1").c_str());
+	system(("route delete 128.0.0.0 mask 128.0.0.0" + if_arg + " >NUL 2>&1").c_str());
 }
 
 std::vector<std::pair<std::string, std::string>> TapAdapter::get_all_tap_adapters()
@@ -146,6 +161,11 @@ bool TapAdapter::open(const std::string& device_guid_in)
 
 bool TapAdapter::configure(const std::string& ip_address, const std::string& netmask, const std::string& gateway)
 {
+	// Always clear overrides left by a previous run before applying this run's
+	// routing policy. This is especially important for maxcalls split-tunnel
+	// mode, where no replacement default routes should exist.
+	remove_full_tunnel_routes();
+
 	// We will use netsh for simplicity to configure the IP
 	// Command: netsh interface ip set address "Adapter Name" static IP Mask Gateway
 
