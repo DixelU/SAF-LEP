@@ -40,8 +40,8 @@ void print_usage(const char* program_name)
 	std::cout << "\nmaxcalls mode (MAX messenger call tunnel):" << std::endl;
 	std::cout << "  " << program_name << " --max-qr-bootstrap         # One-time QR bootstrap (recommended)" << std::endl;
 	std::cout << "  " << program_name << " --max-bootstrap PHONE      # SMS bootstrap, with automatic QR fallback" << std::endl;
-	std::cout << "  " << program_name << " --max-wait -k KEY          # Wait for incoming MAX call" << std::endl;
-	std::cout << "  " << program_name << " --max-call PEER -k KEY     # Call peer ID" << std::endl;
+	std::cout << "  " << program_name << " --max-wait --raw -k KEY       # Wait with low-overhead framing" << std::endl;
+	std::cout << "  " << program_name << " --max-call PEER --raw -k KEY  # Call with low-overhead framing" << std::endl;
 
 	std::cout << "\nManual mode (legacy):" << std::endl;
 	std::cout << "  " << program_name << " --ip IP -p PORT            # Manual IP config" << std::endl;
@@ -55,6 +55,7 @@ void print_usage(const char* program_name)
 	std::cout << "  -v, --verbose                 Enable verbose logging" << std::endl;
 	std::cout << "  -w, --watchscreen             Enable live stats watchscreen" << std::endl;
 	std::cout << "      --lepv1                   Enable experimental LEP::v1 encoder" << std::endl;
+	std::cout << "      --raw                     Minimal framing (4-byte packet index; requires -k)" << std::endl;
 	std::cout << "      --ip IP                   VPN IP address (legacy manual mode)" << std::endl;
 	std::cout << "      --mask MASK               VPN Subnet mask (default: 255.255.255.0)" << std::endl;
 	std::cout << "      --gw GATEWAY              VPN Gateway (legacy manual mode)" << std::endl;
@@ -347,6 +348,10 @@ int main(int argc, char* argv[])
 		{
 			encoder = encode_scheme::lep_v1;
 		}
+		else if (arg == "--raw")
+		{
+			encoder = encode_scheme::raw;
+		}
 		else if (arg == "--max-bootstrap")
 		{
 			if (i + 1 < argc) { max_phone = argv[++i]; maxcalls_mode = true; }
@@ -523,6 +528,14 @@ int main(int argc, char* argv[])
 	if (mode == run_mode::server && local_port == 0)
 	{
 		std::cerr << "Error: Server mode requires an explicit port (-p PORT)" << std::endl;
+		return 1;
+	}
+
+	// Raw framing exposes the packet payload directly, so fail closed rather
+	// than accidentally starting an unencrypted tunnel.
+	if (encoder == encode_scheme::raw && seed_key.empty())
+	{
+		std::cerr << "Error: Raw packet encoding requires an encryption seed key (-k)." << std::endl;
 		return 1;
 	}
 

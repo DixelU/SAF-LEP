@@ -53,6 +53,9 @@ p2p_tunnel::~p2p_tunnel()
 
 void p2p_tunnel::start()
 {
+	if (scheme_ == encode_scheme::raw && !lep::crypto::has_key(encryption_key_))
+		throw std::runtime_error("Raw packet encoding requires an encryption seed key");
+
 	if (running_.exchange(true))
 		return;
 
@@ -161,6 +164,12 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 			case encode_scheme::lep_v1:
 			{
 				decoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v1>::decode(
+					receive_buffer_.data(), bytes_transferred);
+				break;
+			}
+			case encode_scheme::raw:
+			{
+				decoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_packet>::decode(
 					receive_buffer_.data(), bytes_transferred);
 				break;
 			}
@@ -626,6 +635,12 @@ void p2p_tunnel::send_raw_control(peer_connection& peer, std::vector<uint8_t> pa
 				payload.data(), payload.size(), index);
 			break;
 		}
+		case encode_scheme::raw:
+		{
+			encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_packet>::encode(
+				payload.data(), payload.size(), index);
+			break;
+		}
 	}
 
 	if (!encoded.empty())
@@ -936,6 +951,12 @@ void p2p_tunnel::send_fragments(peer_connection& peer_conn, uint32_t packet_id, 
 					payload.data(), payload.size(), packet_id);
 				break;
 			}
+			case encode_scheme::raw:
+			{
+				encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_packet>::encode(
+					payload.data(), payload.size(), packet_id);
+				break;
+			}
 		}
 
 		if (encoded.empty())
@@ -1064,6 +1085,8 @@ void p2p_tunnel::set_encryption_key(const std::string& seed_key)
 {
 	if (seed_key.empty())
 	{
+		if (scheme_ == encode_scheme::raw)
+			throw std::invalid_argument("Raw packet encoding cannot be used without encryption");
 		encryption_key_ = {};
 		return;
 	}

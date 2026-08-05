@@ -48,6 +48,7 @@ enum class encode_scheme
 {
 	lep_v0,
 	lep_v1,
+	raw,
 };
 
 // packet data for long term storage

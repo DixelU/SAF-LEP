@@ -418,6 +418,7 @@ constexpr bool asdf = compiletime_encoder_test();
 
 struct raw_lep_v0;
 struct raw_lep_v1;
+struct raw_packet;
 
 struct packet
 {
@@ -487,6 +488,42 @@ constexpr packet low_entropy_protocol<raw_lep_v1>::decode(const std::uint8_t* da
 	auto packet_data = details::v1::get_lep(data, size);
 
 	return packet{.data = packet_data.data, .index = packet_data.index};
+}
+
+// Minimal framing for transports which already provide datagram boundaries.
+// The packet index stays in cleartext because it selects the per-packet cipher
+// stream; the caller encrypts the payload before encoding it.
+template <>
+constexpr std::vector<std::uint8_t> low_entropy_protocol<raw_packet>::encode(
+	const std::uint8_t* data, std::size_t size, uint32_t index)
+{
+	std::vector<std::uint8_t> encoded_data;
+	encoded_data.reserve(sizeof(index) + size);
+	encoded_data.push_back(static_cast<std::uint8_t>((index >> 24) & 0xFF));
+	encoded_data.push_back(static_cast<std::uint8_t>((index >> 16) & 0xFF));
+	encoded_data.push_back(static_cast<std::uint8_t>((index >> 8) & 0xFF));
+	encoded_data.push_back(static_cast<std::uint8_t>(index & 0xFF));
+	if (size != 0)
+		encoded_data.insert(encoded_data.end(), data, data + size);
+	return encoded_data;
+}
+
+template <>
+constexpr packet low_entropy_protocol<raw_packet>::decode(const std::uint8_t* data, std::size_t size)
+{
+	if (size < sizeof(uint32_t))
+		return {};
+
+	const uint32_t index =
+		(static_cast<uint32_t>(data[0]) << 24) |
+		(static_cast<uint32_t>(data[1]) << 16) |
+		(static_cast<uint32_t>(data[2]) << 8) |
+		static_cast<uint32_t>(data[3]);
+
+	return packet{
+		.data = std::vector<std::uint8_t>(data + sizeof(index), data + size),
+		.index = index
+	};
 }
 
 } // namespace lep

@@ -62,7 +62,7 @@ public final class SettingsActivity extends Activity {
         ArrayAdapter<String> adapter = new ArrayAdapter<>(
                 this,
                 android.R.layout.simple_spinner_dropdown_item,
-                new String[]{"LEP v0  // compatible", "LEP v1"}
+                new String[]{"LEP v0  // compatible", "LEP v1", "RAW  // encryption required"}
         );
         encodingInput.setAdapter(adapter);
         encodingInput.setPopupBackgroundDrawable(new ColorDrawable(HudUi.PANEL_RAISED));
@@ -105,7 +105,7 @@ public final class SettingsActivity extends Activity {
         authPanel.addView(rememberKeyInput);
         TextView keyHelp = HudUi.text(
                 this,
-                "A blank seed disables encryption. Stored seeds are private to the app, not hardware-backed.",
+                "A blank seed disables encryption. RAW mode requires a seed. Stored seeds are private to the app, not hardware-backed.",
                 11,
                 HudUi.MUTED,
                 Typeface.NORMAL
@@ -225,6 +225,8 @@ public final class SettingsActivity extends Activity {
         if (config.host.isEmpty()) hostInput.setError("Remote server is required");
         else if (config.numericPort() < 1 || config.numericPort() > 65535) {
             portInput.setError("Enter a port from 1 to 65535");
+        } else if (config.encoding == 2 && config.seedKey.isEmpty()) {
+            keyInput.setError("RAW mode requires a seed key");
         } else if (!AppSettings.isValidIpv4(config.vpnAddress)) {
             vpnAddressInput.setError("Enter an IPv4 address");
         } else if (AppSettings.netmaskToPrefix(config.vpnMask) < 0) {

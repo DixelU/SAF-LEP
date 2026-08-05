@@ -33,6 +33,7 @@ public final class AppSettings {
         }
 
         public String protocolName() {
+            if (encoding == 2) return "RAW";
             return encoding == 1 ? "LEP v1" : "LEP v0";
         }
 
@@ -47,7 +48,7 @@ public final class AppSettings {
         Config config = new Config();
         config.host = prefs.getString("host", "");
         config.port = prefs.getString("port", "14578");
-        config.encoding = Math.max(0, Math.min(1, prefs.getInt("encoding", 0)));
+        config.encoding = Math.max(0, Math.min(2, prefs.getInt("encoding", 0)));
         config.vpnAddress = prefs.getString("vpn_ip", "10.0.0.2");
         config.vpnMask = prefs.getString("vpn_mask", "255.255.255.0");
         config.vpnGateway = prefs.getString("vpn_gateway", "10.0.0.1");
@@ -65,7 +66,7 @@ public final class AppSettings {
                 .edit()
                 .putString("host", config.host.trim())
                 .putString("port", config.port.trim())
-                .putInt("encoding", config.encoding == 1 ? 1 : 0)
+                .putInt("encoding", Math.max(0, Math.min(2, config.encoding)))
                 .putString("vpn_ip", config.vpnAddress.trim())
                 .putString("vpn_mask", config.vpnMask.trim())
                 .putString("vpn_gateway", config.vpnGateway.trim())
@@ -80,6 +81,9 @@ public final class AppSettings {
         if (config.host.trim().isEmpty()) return "Set a remote server first.";
         if (config.numericPort() < 1 || config.numericPort() > 65535) {
             return "Server port must be between 1 and 65535.";
+        }
+        if (config.encoding == 2 && config.seedKey.isEmpty()) {
+            return "Raw packet encoding requires a seed key.";
         }
         if (!isValidIpv4(config.vpnAddress.trim())) return "VPN address is not valid IPv4.";
         if (netmaskToPrefix(config.vpnMask.trim()) < 0) return "VPN netmask is not contiguous.";

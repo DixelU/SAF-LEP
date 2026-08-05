@@ -84,6 +84,16 @@ private:
 	tunnel_stats stats_;
 
 	static constexpr size_t MAX_FRAGMENT_SIZE = 150;
+	static constexpr size_t MAX_RAW_FRAGMENT_SIZE = 1200;
+	// Keeps raw application datagrams below conservative ICE/TURN path MTUs
+	// while avoiding LEP's ten-way fragmentation of a typical VPN packet.
+
+	size_t fragment_payload_size() const noexcept
+	{
+		return scheme_ == encode_scheme::raw
+			? MAX_RAW_FRAGMENT_SIZE
+			: MAX_FRAGMENT_SIZE;
+	}
 };
 
 } // namespace udp

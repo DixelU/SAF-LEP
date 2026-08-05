@@ -137,7 +137,7 @@ JNIEXPORT void JNICALL JNI_OnUnload(JavaVM* vm, void* reserved)
  * @param server_ip The server IP address to connect to
  * @param server_port The server port
  * @param seed_key The encryption seed key (empty string for no encryption)
- * @param encoding_scheme LEP encoding scheme (0=v0, 1=v1)
+ * @param encoding_scheme Packet encoding scheme (0=LEP v0, 1=LEP v1, 2=raw)
  * @param verbose Enable verbose logging
  * @return true if started successfully
  */
@@ -192,9 +192,10 @@ Java_com_example_saflep_SafLepVpnService_startNativeVpn(
 	{
 		// Create the P2P tunnel
 		// Use port 0 to let the OS assign a port
-		const auto scheme = encoding_scheme == 1
-			? dixelu::udp::encode_scheme::lep_v1
-			: dixelu::udp::encode_scheme::lep_v0;
+		const auto scheme = encoding_scheme == 2
+			? dixelu::udp::encode_scheme::raw
+			: encoding_scheme == 1 ? dixelu::udp::encode_scheme::lep_v1
+			                       : dixelu::udp::encode_scheme::lep_v0;
 		g_tunnel = std::make_shared<dixelu::udp::p2p_tunnel>(0, scheme);
 		const int socket_fd = g_tunnel->get_socket_fd();
 		if (socket_fd < 0 || !protectSocket(socket_fd))

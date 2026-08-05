@@ -101,11 +101,12 @@ android/
 `-- gradlew / gradlew.bat
 ```
 
-The launcher offers both LEP v0 and LEP v1. LEP v0 remains the default for
-compatibility with existing workflows; the client and server must select the
-same scheme. The native bridge protects the UDP socket from VPN routing, and
-the TUN adapter owns a duplicated file descriptor so shutdown cannot invalidate
-the descriptor managed by Java.
+The launcher offers LEP v0, LEP v1, and raw framing. LEP v0 remains the default
+for compatibility with existing workflows; the client and server must select
+the same scheme. Raw framing adds only a four-byte packet index and the launcher
+requires a non-empty seed key for it. The native bridge protects the UDP socket
+from VPN routing, and the TUN adapter owns a duplicated file descriptor so
+shutdown cannot invalidate the descriptor managed by Java.
 
 ## Launcher settings and status
 

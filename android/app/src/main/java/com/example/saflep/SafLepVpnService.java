@@ -160,7 +160,7 @@ public final class SafLepVpnService extends VpnService {
         String serverHost = stringExtra(intent, EXTRA_SERVER_IP, "").trim();
         int serverPort = intent.getIntExtra(EXTRA_SERVER_PORT, 0);
         String seedKey = stringExtra(intent, EXTRA_SEED_KEY, "");
-        int encodingScheme = intent.getIntExtra(EXTRA_ENCODING_SCHEME, 0) == 1 ? 1 : 0;
+        int encodingScheme = Math.max(0, Math.min(2, intent.getIntExtra(EXTRA_ENCODING_SCHEME, 0)));
         boolean verbose = intent.getBooleanExtra(EXTRA_VERBOSE, false);
         String vpnAddress = stringExtra(intent, EXTRA_VPN_ADDRESS, "10.0.0.2").trim();
         int vpnPrefix = intent.getIntExtra(EXTRA_VPN_PREFIX, 24);
@@ -228,7 +228,8 @@ public final class SafLepVpnService extends VpnService {
             String resolvedServerIp = resolveIpv4(serverHost);
             if (!isCurrentGeneration(generation)) return;
 
-            String protocol = encodingScheme == 1 ? "LEP v1" : "LEP v0";
+            String protocol = encodingScheme == 2 ? "RAW"
+                    : encodingScheme == 1 ? "LEP v1" : "LEP v0";
             String routeMode = vpnGateway.isEmpty()
                     ? "VPN subnet only"
                     : "full IPv4 via " + vpnGateway;

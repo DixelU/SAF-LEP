@@ -22,8 +22,9 @@ The goal of this project is **DPI evasion**, not secure encryption. If you need 
 
 ## Features
 - **Cross-Platform**: Runs on **Windows** (using TAP-Windows adapter) and **Linux** (using TUN interface). **Android** support is in progress.
-- **P2P Architecture**: UDP-based tunneling with NAT traversal capabilities.
-- **Fragmentation & Reassembly**: Custom reliability layer over UDP to handle large IP packets (MTU 1500) over smaller UDP datagrams.
+- **Selectable Transport**: Direct UDP or a peer datagram connection established through a MAX messenger call (MaxTunnel).
+- **Fragmentation & Reassembly**: Custom packet fragmentation over either datagram transport.
+- **Traffic-Efficient Raw Framing**: Adds only a four-byte packet index when LEP cover traffic is unnecessary.
 - **Resiliency**: Implements packet loss detection and retransmission (ARQ) with backoff logic to prevent network flooding.
 - **Live Watchscreen**: Real-time monitoring of VPN statistics, throughput, and packet events with `-w` flag.
 - **DPI Evasion**:
@@ -52,7 +53,7 @@ The goal of this project is **DPI evasion**, not secure encryption. If you need 
     - High priority ⭐
 - Fully automatic setup (just address and mode flag, nothing more 😅)
 - Containerized version (Docker)
-- More encoding "modes" (currently only `raw_lep_v0` is implemented - partially VoIP/MPEG1 like headers with near-constant value fields)
+- More cover-traffic modes (LEP v0, LEP v1, and minimal raw framing are implemented)
     - `html`
     - `raw_text`
     - `rtsp`
@@ -111,16 +112,41 @@ For developers interested in contributing or testing, see the [Android README](a
 Usage: SAF-LEP [OPTIONS]
 
 Options:
-  -p, --port PORT          Local UDP port (default: 0 = auto)
-  -c, --connect HOST:PORT  Connect to peer
+  -p, --port PORT          Local UDP port
+  -c, --connect HOST:PORT  Connect using direct UDP
   -v, --verbose            Enable verbose logging
   -w, --watchscreen        Enable live stats watchscreen
+      --lepv1              Use experimental LEP v1 encoding
+      --raw                Use four-byte-index raw framing (requires -k)
       --ip IP              VPN IP address (e.g. 10.0.0.1)
-      --mask MASK          VPN Subnet mask (default: 255.255.255.0)
-      --gw GATEWAY         VPN Gateway (optional)
-  -k, --seed-key KEY       Encryption seed key (optional)
-  -h, --help               Show help message
+      --mask MASK          VPN subnet mask (default: 255.255.255.0)
+      --gw GATEWAY         VPN gateway (optional)
+      --max-qr-bootstrap   Obtain a MAX login token through QR authentication
+      --max-bootstrap PHONE
+                          Obtain a MAX login token through SMS/QR authentication
+      --max-token TOKEN    MAX login token (or set MAXCALLS_TOKEN)
+      --max-call PEER_ID   Call a MaxTunnel peer
+      --max-wait           Wait for an incoming MaxTunnel peer
+  -k, --seed-key KEY       Encryption seed key; mandatory with --raw
+  -h, --help               Show help
 ```
+
+### MaxTunnel with low-overhead raw framing
+
+MaxTunnel uses the datagram-preserving maxcalls::Connection supplied by the
+adjacent SAF-AVTTS project instead of SAF-LEP's direct UDP socket. Bootstrap each
+MAX account once, then use the same seed and encoding on both peers:
+
+    # Exit peer
+    sudo ./SAF-LEP --max-wait --raw -k "shared seed"
+
+    # Calling peer
+    ./SAF-LEP --max-call PEER_ID --raw -k "shared seed"
+
+Raw framing sends a four-byte, network-order packet index followed by the
+encrypted fragment. On MaxTunnel it also uses 1200-byte fragment payloads,
+reducing a typical 1500-byte VPN packet from ten transport datagrams to two.
+SAF-LEP refuses to start raw mode without a seed key. LEP v0 remains the default.
 
 ### 1. Server Setup (Linux)
 The server acts as the exit node. It needs to forward traffic from the VPN interface (`tun0`) to the internet (`eth0` or `wlan0`).
@@ -249,7 +275,7 @@ PRs for improvements and new encoding modes are welcome!
                        │
 ┌──────────────────────▼──────────────────────────────┐
 │       Fragmentation/Reassembly Layer                │
-│       (Splits packets into 150-byte chunks)         │
+│       (150-byte LEP / 1200-byte raw MaxTunnel)      │
 └──────────────────────┬──────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────┐
@@ -258,13 +284,13 @@ PRs for improvements and new encoding modes are welcome!
 └──────────────────────┬──────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────┐
-│    Low Entropy Protocol (LEP) Encoding              │
-│   (Embeds encrypted data in low-entropy frames)     │
+│            Packet Framing Layer                     │
+│       (LEP v0, LEP v1, or 4-byte-index raw)         │
 └──────────────────────┬──────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────┐
-│           UDP/IP Layer (Boost.ASIO)                 │
-│        (Sends encoded packets over UDP)             │
+│              Datagram Transport                     │
+│          (Direct UDP or MaxTunnel over ICE)         │
 └─────────────────────────────────────────────────────┘
 ```
 

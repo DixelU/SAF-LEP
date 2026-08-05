@@ -63,6 +63,8 @@ void maxcalls_tunnel::set_encryption_key(const std::string& seed_key)
 {
 	if (seed_key.empty())
 	{
+		if (scheme_ == encode_scheme::raw)
+			throw std::invalid_argument("Raw packet encoding cannot be used without encryption");
 		encryption_key_ = {};
 		return;
 	}
@@ -80,6 +82,9 @@ void maxcalls_tunnel::set_encryption_key(const std::string& seed_key)
 
 void maxcalls_tunnel::start()
 {
+	if (scheme_ == encode_scheme::raw && !lep::crypto::has_key(encryption_key_))
+		throw std::runtime_error("Raw packet encoding requires an encryption seed key");
+
 	if (running_.exchange(true))
 		return;
 
@@ -274,6 +279,11 @@ void maxcalls_tunnel::process_incoming_datagram(const uint8_t* data, size_t size
 				decoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v1>::decode(data, size);
 				break;
 			}
+			case encode_scheme::raw:
+			{
+				decoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_packet>::decode(data, size);
+				break;
+			}
 		}
 
 		// Decrypt after LEP decoding
@@ -316,7 +326,7 @@ void maxcalls_tunnel::process_incoming_datagram(const uint8_t* data, size_t size
 
 			if (frag_index < total_frags && !assembly.received_frags_mask[frag_index])
 			{
-				size_t offset = frag_index * MAX_FRAGMENT_SIZE;
+				size_t offset = frag_index * fragment_payload_size();
 				if (assembly.data.size() < offset + payload_size)
 				{
 					assembly.data.resize(offset + payload_size);
@@ -371,7 +381,8 @@ void maxcalls_tunnel::broadcast(const std::vector<uint8_t>& data)
 void maxcalls_tunnel::send_fragments(uint32_t packet_id, const std::vector<uint8_t>& data)
 {
 	size_t total_size = data.size();
-	size_t num_frags = (total_size + MAX_FRAGMENT_SIZE - 1) / MAX_FRAGMENT_SIZE;
+	const size_t fragment_size = fragment_payload_size();
+	size_t num_frags = (total_size + fragment_size - 1) / fragment_size;
 	uint8_t total_frags_u8 = static_cast<uint8_t>(num_frags);
 
 	if (num_frags > 255)
@@ -385,8 +396,8 @@ void maxcalls_tunnel::send_fragments(uint32_t packet_id, const std::vector<uint8
 
 	for (size_t i = 0; i < num_frags; ++i)
 	{
-		size_t offset = i * MAX_FRAGMENT_SIZE;
-		size_t chunk_size = (std::min)(MAX_FRAGMENT_SIZE, total_size - offset);
+		size_t offset = i * fragment_size;
+		size_t chunk_size = (std::min)(fragment_size, total_size - offset);
 
 		// Prepare payload with header: [PacketID(4)][FragIndex(1)][TotalFrags(1)][Data...]
 		std::vector<uint8_t> payload;
@@ -416,6 +427,12 @@ void maxcalls_tunnel::send_fragments(uint32_t packet_id, const std::vector<uint8
 			case encode_scheme::lep_v1:
 			{
 				encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v1>::encode(
+					payload.data(), payload.size(), packet_id);
+				break;
+			}
+			case encode_scheme::raw:
+			{
+				encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_packet>::encode(
 					payload.data(), payload.size(), packet_id);
 				break;
 			}
