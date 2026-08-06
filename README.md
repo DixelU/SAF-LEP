@@ -193,8 +193,9 @@ The detailed Android build notes and APK path are in
 
 ## Quick start: direct UDP
 
-The defaults use VPN subnet 10.0.0.0/24, with 10.0.0.1 on the listening side
-and 10.0.0.2 on the connecting side.
+The defaults use VPN subnet 10.0.0.0/24, with 10.0.0.1 on the listening side.
+A direct-UDP automatic client chooses a random host address from 10.0.0.2
+through 10.0.0.254 and prints the choice at startup.
 
 ### Linux exit node
 
@@ -229,6 +230,22 @@ Windows, from an elevated terminal:
 Automatic client mode resolves the server before installing VPN routes and pins
 the server's public IPv4 address to the existing physical gateway. This keeps
 the transport socket out of the VPN and prevents a routing loop.
+
+For a multi-client server, enable destination-IP routing instead of compatible
+hub fan-out:
+
+~~~bash
+sudo ./build/SAF-LEP -s -p 14578 --forwarding route -k "shared seed"
+~~~
+
+On the listening side, routed mode learns each peer's inner source IP and sends
+ordinary unicast only to the peer that owns the destination IP. A connecting
+client continues to use its single configured peer as the upstream route.
+Unknown server-side unicast and duplicate address claims are dropped; multicast
+and subnet-broadcast packets still fan out. The default `--forwarding hub` mode
+retains the legacy behavior. Automatically configured direct-UDP clients already
+use randomized addresses. In manual mode, give every client a distinct `--ip`
+value in the server's VPN subnet.
 
 Add the same framing flag at both ends when changing the default. For example:
 
@@ -411,6 +428,7 @@ VPN:
       --ip IP                     VPN address; selects manual mode
       --mask MASK                 VPN subnet mask
       --gw GATEWAY                VPN gateway; non-empty means full IPv4 tunnel
+      --forwarding MODE           hub (default) or route (per-peer IP routing)
       --tun-name NAME             Linux TUN device name; default: tun0
       --tap-guid GUID             Windows TAP adapter GUID; default: first TAP
 
@@ -439,6 +457,8 @@ unless -k is non-empty.
 - Add router port-forwarding if the listener is behind NAT.
 - Verify both sides use the same framing mode, key, and VPN subnet.
 - Use -v to see packet events and retransmission activity.
+- In routed mode, ensure every client has a unique VPN IP. Check route drop and
+  conflict counters if a randomly selected automatic address collides.
 
 **MaxTunnel authenticates but cannot carry traffic**
 

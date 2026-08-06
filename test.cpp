@@ -7,6 +7,7 @@
 #include <sstream>
 #include <atomic>
 #include <cstdlib>
+#include <random>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -76,6 +77,7 @@ void print_usage(const char* program_name)
 	std::cout << "      --ip IP                   VPN IP address (legacy manual mode)" << std::endl;
 	std::cout << "      --mask MASK               VPN Subnet mask (default: 255.255.255.0)" << std::endl;
 	std::cout << "      --gw GATEWAY              VPN Gateway (legacy manual mode)" << std::endl;
+	std::cout << "      --forwarding MODE         hub (compatible default) or route (per-peer IP routing)" << std::endl;
 #ifdef _WIN32
 	std::cout << "      --tap-guid GUID            Use a specific TAP-Windows adapter (default: first TAP)" << std::endl;
 #else
@@ -245,6 +247,8 @@ void run_watchscreen(std::shared_ptr<tunnel_interface> tunnel, std::atomic<bool>
 		std::cout << "  Out: " << std::setw(12) << format_throughput(tap_out_rate)
 		          << "  (total: " << format_bytes(curr_tap_out) << ")" << std::endl;
 		std::cout << "  Broadcast drops (no peer): " << stats.broadcast_drops.load() << std::endl;
+		std::cout << "  Route drops / conflicts: " << stats.route_drops.load()
+		          << " / " << stats.route_conflicts.load() << std::endl;
 		std::cout << std::endl;
 
 		// Stats summary
@@ -315,6 +319,7 @@ int main(int argc, char* argv[])
 	bool watchscreen_mode = false;
 	bool server_mode = false;
 	encode_scheme encoder = encode_scheme::lep_v0;
+	forwarding_mode forwarding = forwarding_mode::hub;
 
 	bool maxcalls_mode = false;
 	std::string max_phone;
@@ -363,6 +368,24 @@ int main(int argc, char* argv[])
 		else if (arg == "--gw")
 		{
 			if (i + 1 < argc) vpn_gw = argv[++i];
+		}
+		else if (arg == "--forwarding")
+		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Error: --forwarding requires hub or route" << std::endl;
+				return 1;
+			}
+			const std::string value = argv[++i];
+			if (value == "hub")
+				forwarding = forwarding_mode::hub;
+			else if (value == "route")
+				forwarding = forwarding_mode::route;
+			else
+			{
+				std::cerr << "Error: --forwarding must be hub or route" << std::endl;
+				return 1;
+			}
 		}
 		else if (arg == "--tun-name")
 		{
@@ -584,9 +607,12 @@ int main(int argc, char* argv[])
 	else if (!connect_to.empty())
 	{
 		mode = run_mode::client;
-		vpn_ip = "10.0.0.2";
+		std::random_device generator;
+		const auto host_octet = routing::random_client_host_octet(generator);
+		vpn_ip = "10.0.0." + std::to_string(host_octet);
 		vpn_mask = "255.255.255.0";
 		vpn_gw = "10.0.0.1";
+		std::cout << "[AutoSetup] Selected client VPN address: " << vpn_ip << std::endl;
 	}
 	else
 	{
@@ -719,7 +745,10 @@ int main(int argc, char* argv[])
 		}
 
 		// Create VPN interface
-		auto vpn = std::make_shared<vpn_interface>(tunnel, adapter_identifier);
+		const bool learn_peer_routes = server_mode ||
+			(connect_to.empty() && (!maxcalls_mode || max_wait));
+		auto vpn = std::make_shared<vpn_interface>(
+			tunnel, adapter_identifier, forwarding, learn_peer_routes);
 
 		if (!maxcalls_mode)
 		{
@@ -732,7 +761,9 @@ int main(int argc, char* argv[])
 		// Configure the VPN interface before starting the transport. On Windows
 		// this also removes stale full-tunnel routes from the selected TAP before
 		// maxcalls performs its first DNS lookup.
-		std::cout << "[VPN] Starting VPN interface on " << vpn_ip;
+		std::cout << "[VPN] Starting VPN interface on " << vpn_ip
+		          << " with " << (forwarding == forwarding_mode::route ? "routed" : "hub")
+		          << " forwarding";
 #ifdef _WIN32
 		if (!tap_guid.empty())
 			std::cout << " using TAP " << tap_guid;
@@ -842,6 +873,8 @@ int main(int argc, char* argv[])
 				          << " | tap_in=" << format_throughput(static_cast<uint64_t>((ti - l_ti) / dt))
 				          << " tap_out=" << format_throughput(static_cast<uint64_t>((to - l_to) / dt))
 				          << " | drops=" << s.broadcast_drops.load()
+				          << "/" << s.route_drops.load()
+				          << " conflicts=" << s.route_conflicts.load()
 				          << " peers=" << tunnel->get_connected_peers().size()
 				          << "/" << tunnel->get_peer_count()
 				          << std::endl;

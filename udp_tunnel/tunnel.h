@@ -22,6 +22,7 @@
 
 #include "../lep/encryption.h"
 #include "../lep/low_entropy_protocol.h"
+#include "ip_routing.h"
 
 #ifdef _WIN32
 #include "windows_tap.h"
@@ -49,6 +50,12 @@ enum class encode_scheme
 	lep_v0,
 	lep_v1,
 	raw,
+};
+
+enum class forwarding_mode
+{
+	hub,
+	route,
 };
 
 // packet data for long term storage
@@ -97,6 +104,8 @@ struct tunnel_stats
 	std::atomic<uint64_t> tap_bytes_in{0};
 	std::atomic<uint64_t> tap_bytes_out{0};
 	std::atomic<uint64_t> broadcast_drops{0};
+	std::atomic<uint64_t> route_drops{0};
+	std::atomic<uint64_t> route_conflicts{0};
 
 	mutable std::mutex events_mutex;
 	std::deque<packet_event> recent_events;
@@ -180,6 +189,8 @@ public:
 	virtual void start() = 0;
 	virtual void stop() = 0;
 	virtual void broadcast(const std::vector<uint8_t>& data) = 0;
+	virtual void send_to_peer_async(const std::vector<uint8_t>& data,
+		const boost::asio::ip::udp::endpoint& peer) = 0;
 	virtual void set_packet_received_callback(packet_received_callback cb) = 0;
 	virtual tunnel_stats& get_stats() = 0;
 	virtual const tunnel_stats& get_stats() const = 0;
@@ -207,7 +218,8 @@ public:
 	void run_in_thread();
 
 	// Send data to a specific peer (with LEP encoding)
-	void send_to_peer_async(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& peer);
+	void send_to_peer_async(const std::vector<uint8_t>& data,
+		const boost::asio::ip::udp::endpoint& peer) override;
 
 	// Broadcast to all connected peers
 	void broadcast(const std::vector<uint8_t>& data) override;
@@ -317,7 +329,9 @@ class vpn_interface
 {
 public:
 	explicit vpn_interface(std::shared_ptr<tunnel_interface> tunnel,
-		std::string adapter_identifier = {});
+		std::string adapter_identifier = {},
+		forwarding_mode forwarding = forwarding_mode::hub,
+		bool learn_peer_routes = false);
 	~vpn_interface();
 
 	// Start the VPN interface (desktop platforms)
@@ -337,6 +351,12 @@ private:
 	// Linux: requested TUN device name. Windows: requested TAP device GUID.
 	// Empty preserves the platform's legacy default selection.
 	std::string adapter_identifier_;
+	forwarding_mode forwarding_mode_;
+	bool learn_peer_routes_;
+	std::mutex routes_mutex_;
+	routing::route_bindings routes_;
+	std::unordered_map<std::string, boost::asio::ip::udp::endpoint> route_endpoints_;
+	std::optional<std::string> subnet_broadcast_key_;
 #ifdef _WIN32
 	std::unique_ptr<TapAdapter> tap_adapter_;
 	boost::asio::ip::address_v4 local_ip_;
@@ -349,7 +369,12 @@ private:
 	std::thread read_thread_;
 
 	void read_from_tap();
+	void forward_adapter_packet(const std::vector<uint8_t>& data);
+	void route_adapter_packet(const std::vector<uint8_t>& data);
+	bool learn_peer_route(const routing::ip_packet_info& packet,
+		const boost::asio::ip::udp::endpoint& from);
 	void handle_tunnel_packet(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& from);
+	static std::string endpoint_key(const boost::asio::ip::udp::endpoint& endpoint);
 
 	void handle_arp(const std::vector<uint8_t>& packet);
 

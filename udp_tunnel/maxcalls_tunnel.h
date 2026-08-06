@@ -32,6 +32,8 @@ public:
 	void start() override;
 	void stop() override;
 	void broadcast(const std::vector<uint8_t>& data) override;
+	void send_to_peer_async(const std::vector<uint8_t>& data,
+		const boost::asio::ip::udp::endpoint& peer) override;
 	void set_packet_received_callback(packet_received_callback cb) override;
 	
 	tunnel_stats& get_stats() override { return stats_; }

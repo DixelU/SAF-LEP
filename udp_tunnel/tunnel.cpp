@@ -1163,9 +1163,13 @@ void p2p_tunnel::update_peer_activity(const boost::asio::ip::udp::endpoint& endp
 
 // VPN Interface Implementation
 vpn_interface::vpn_interface(std::shared_ptr<tunnel_interface> tunnel,
-	std::string adapter_identifier)
+	std::string adapter_identifier,
+	forwarding_mode forwarding,
+	bool learn_peer_routes)
 	: tunnel_(std::move(tunnel))
 	, adapter_identifier_(std::move(adapter_identifier))
+	, forwarding_mode_(forwarding)
+	, learn_peer_routes_(learn_peer_routes)
 #ifdef _WIN32
 	, tap_adapter_(std::make_unique<TapAdapter>())
 #elif defined(__ANDROID__)
@@ -1185,6 +1189,9 @@ bool vpn_interface::start(const std::string& ip, const std::string& mask, const 
 {
 	if (running_.exchange(true))
 		return true;
+
+	if (forwarding_mode_ == forwarding_mode::route)
+		subnet_broadcast_key_ = routing::subnet_broadcast_key(ip, mask);
 
 #ifdef _WIN32
 	// Open TAP adapter
@@ -1301,6 +1308,133 @@ void vpn_interface::stop()
 		read_thread_.detach();
 		#endif
 	}
+
+	std::lock_guard<std::mutex> lock(routes_mutex_);
+	routes_ = {};
+	route_endpoints_.clear();
+}
+
+std::string vpn_interface::endpoint_key(const boost::asio::ip::udp::endpoint& endpoint)
+{
+	return endpoint.address().to_string() + "|" + std::to_string(endpoint.port());
+}
+
+bool vpn_interface::learn_peer_route(const routing::ip_packet_info& packet,
+	const boost::asio::ip::udp::endpoint& from)
+{
+	if (!routing::has_usable_source(packet))
+	{
+		tunnel_->get_stats().route_drops++;
+		return false;
+	}
+
+	const std::string address = routing::source_key(packet);
+	const std::string peer = endpoint_key(from);
+	const auto connected_peers = tunnel_->get_connected_peers();
+
+	std::lock_guard<std::mutex> lock(routes_mutex_);
+	auto result = routes_.learn(address, peer);
+	if (result == routing::learn_result::address_conflict)
+	{
+		const auto old_peer = routes_.peer_for(address);
+		bool old_peer_connected = false;
+		if (old_peer)
+		{
+			const auto old_endpoint = route_endpoints_.find(*old_peer);
+			if (old_endpoint != route_endpoints_.end())
+			{
+				old_peer_connected = std::ranges::find(connected_peers, old_endpoint->second) != connected_peers.end();
+			}
+		}
+
+		if (old_peer && !old_peer_connected)
+		{
+			routes_.erase_peer(*old_peer);
+			route_endpoints_.erase(*old_peer);
+			result = routes_.learn(address, peer);
+		}
+	}
+
+	if (result == routing::learn_result::address_conflict || result == routing::learn_result::peer_conflict)
+	{
+		auto& stats = tunnel_->get_stats();
+		const uint64_t conflicts = ++stats.route_conflicts;
+		stats.route_drops++;
+		if (conflicts <= 5 || (conflicts & (conflicts - 1)) == 0)
+			stats.add_log("[Route] Rejected duplicate VPN address claim from " + peer);
+		return false;
+	}
+
+	route_endpoints_[peer] = from;
+	if (result == routing::learn_result::learned)
+		tunnel_->get_stats().add_log("[Route] Learned VPN address for " + peer);
+	return true;
+}
+
+void vpn_interface::route_adapter_packet(const std::vector<uint8_t>& data)
+{
+	const auto packet = routing::inspect_ip_packet(data);
+	if (!packet)
+	{
+		tunnel_->get_stats().route_drops++;
+		return;
+	}
+
+	const std::string destination = routing::destination_key(*packet);
+	if (routing::has_group_destination(*packet) ||
+		(subnet_broadcast_key_ && destination == *subnet_broadcast_key_))
+	{
+		tunnel_->broadcast(data);
+		return;
+	}
+
+	std::optional<boost::asio::ip::udp::endpoint> target;
+	std::optional<std::string> target_peer;
+	{
+		std::lock_guard<std::mutex> lock(routes_mutex_);
+		target_peer = routes_.peer_for(destination);
+		if (target_peer)
+		{
+			const auto endpoint = route_endpoints_.find(*target_peer);
+			if (endpoint != route_endpoints_.end())
+				target = endpoint->second;
+		}
+	}
+
+	const auto connected_peers = tunnel_->get_connected_peers();
+	if (target)
+	{
+		if (std::ranges::find(connected_peers, *target) != connected_peers.end())
+		{
+			tunnel_->send_to_peer_async(data, *target);
+			return;
+		}
+
+		std::lock_guard<std::mutex> lock(routes_mutex_);
+		routes_.erase_peer(*target_peer);
+		route_endpoints_.erase(*target_peer);
+		tunnel_->get_stats().route_drops++;
+		return;
+	}
+
+	// A connecting client has one upstream peer and cannot learn its route until
+	// the first reply arrives. This also handles a one-client server without
+	// duplicating traffic. Once multiple peers exist, unknown unicast fails closed.
+	if (!target_peer && connected_peers.size() == 1)
+	{
+		tunnel_->send_to_peer_async(data, connected_peers.front());
+		return;
+	}
+
+	tunnel_->get_stats().route_drops++;
+}
+
+void vpn_interface::forward_adapter_packet(const std::vector<uint8_t>& data)
+{
+	if (forwarding_mode_ == forwarding_mode::route)
+		route_adapter_packet(data);
+	else
+		tunnel_->broadcast(data);
 }
 
 void vpn_interface::read_from_tap()
@@ -1326,7 +1460,7 @@ void vpn_interface::read_from_tap()
 					if (VERBOSE_MODE)
 						std::cout << "[VPN] TAP -> Tunnel: IP packet size=" << ip_packet.size() << std::endl;
 
-					tunnel_->broadcast(ip_packet);
+					forward_adapter_packet(ip_packet);
 				}
 				else if (ether_type == 0x0806) // ARP
 				{
@@ -1346,8 +1480,7 @@ void vpn_interface::read_from_tap()
 		if (!packet.empty())
 		{
 			tunnel_->get_stats().tap_bytes_in += packet.size();
-			// Broadcast to all peers (simple hub mode)
-			tunnel_->broadcast(packet);
+			forward_adapter_packet(packet);
 		}
 #endif
 	}
@@ -1478,6 +1611,18 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 				std::cout << "[VPN] Dropping small packet: size=" << data.size() << std::endl;
 		}
 		return;
+	}
+
+	if (forwarding_mode_ == forwarding_mode::route && learn_peer_routes_)
+	{
+		const auto packet = routing::inspect_ip_packet(data);
+		if (!packet)
+		{
+			tunnel_->get_stats().route_drops++;
+			return;
+		}
+		if (!learn_peer_route(*packet, from))
+			return;
 	}
 
 	if (VERBOSE_MODE)

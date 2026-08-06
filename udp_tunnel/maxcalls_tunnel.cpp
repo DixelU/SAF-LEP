@@ -378,6 +378,20 @@ void maxcalls_tunnel::broadcast(const std::vector<uint8_t>& data)
 	send_fragments(packet_id, data);
 }
 
+void maxcalls_tunnel::send_to_peer_async(const std::vector<uint8_t>& data,
+	const boost::asio::ip::udp::endpoint& peer)
+{
+	// MaxTunnel currently exposes exactly one active call. Keep the endpoint in
+	// the common interface so vpn_interface can use the same routed-forwarding
+	// path without pretending that a multi-peer MaxTunnel transport exists.
+	if (peer != dummy_endpoint_)
+	{
+		stats_.route_drops++;
+		return;
+	}
+	broadcast(data);
+}
+
 void maxcalls_tunnel::send_fragments(uint32_t packet_id, const std::vector<uint8_t>& data)
 {
 	size_t total_size = data.size();
