@@ -316,7 +316,8 @@ private:
 class vpn_interface
 {
 public:
-	explicit vpn_interface(std::shared_ptr<tunnel_interface> tunnel);
+	explicit vpn_interface(std::shared_ptr<tunnel_interface> tunnel,
+		std::string adapter_identifier = {});
 	~vpn_interface();
 
 	// Start the VPN interface (desktop platforms)
@@ -333,6 +334,9 @@ public:
 
 private:
 	std::shared_ptr<tunnel_interface> tunnel_;
+	// Linux: requested TUN device name. Windows: requested TAP device GUID.
+	// Empty preserves the platform's legacy default selection.
+	std::string adapter_identifier_;
 #ifdef _WIN32
 	std::unique_ptr<TapAdapter> tap_adapter_;
 	boost::asio::ip::address_v4 local_ip_;

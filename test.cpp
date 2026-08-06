@@ -29,6 +29,23 @@
 using namespace dixelu::udp;
 using namespace dixelu::udp::autosetup;
 
+#ifndef _WIN32
+bool is_valid_tun_name(const std::string& name)
+{
+	if (name.empty() || name.size() > 15)
+		return false;
+
+	for (const unsigned char c : name)
+	{
+		const bool alpha_numeric = (c >= 'a' && c <= 'z') ||
+			(c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+		if (!alpha_numeric && c != '_' && c != '-' && c != '.')
+			return false;
+	}
+	return true;
+}
+#endif
+
 void print_usage(const char* program_name)
 {
 	std::cout << "Usage: " << program_name << " [OPTIONS]" << std::endl;
@@ -59,6 +76,11 @@ void print_usage(const char* program_name)
 	std::cout << "      --ip IP                   VPN IP address (legacy manual mode)" << std::endl;
 	std::cout << "      --mask MASK               VPN Subnet mask (default: 255.255.255.0)" << std::endl;
 	std::cout << "      --gw GATEWAY              VPN Gateway (legacy manual mode)" << std::endl;
+#ifdef _WIN32
+	std::cout << "      --tap-guid GUID            Use a specific TAP-Windows adapter (default: first TAP)" << std::endl;
+#else
+	std::cout << "      --tun-name NAME            Use a specific TUN device (default: tun0)" << std::endl;
+#endif
 	std::cout << "      --max-qr-bootstrap        One-time QR bootstrap via the official MAX app" << std::endl;
 	std::cout << "      --max-bootstrap PHONE     SMS bootstrap (e.g. +79991234567); falls back to QR if CAPTCHA is required" << std::endl;
 	std::cout << "      --max-token TOKEN         MAX login token" << std::endl;
@@ -288,6 +310,8 @@ int main(int argc, char* argv[])
 	std::string vpn_mask = "255.255.255.0";
 	std::string vpn_gw;
 	std::string seed_key;
+	std::string tun_name;
+	std::string tap_guid;
 	bool watchscreen_mode = false;
 	bool server_mode = false;
 	encode_scheme encoder = encode_scheme::lep_v0;
@@ -340,6 +364,24 @@ int main(int argc, char* argv[])
 		{
 			if (i + 1 < argc) vpn_gw = argv[++i];
 		}
+		else if (arg == "--tun-name")
+		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Error: --tun-name requires a device name" << std::endl;
+				return 1;
+			}
+			tun_name = argv[++i];
+		}
+		else if (arg == "--tap-guid")
+		{
+			if (i + 1 >= argc)
+			{
+				std::cerr << "Error: --tap-guid requires an adapter GUID" << std::endl;
+				return 1;
+			}
+			tap_guid = argv[++i];
+		}
 		else if (arg == "-k" || arg == "--seed-key")
 		{
 			if (i + 1 < argc) seed_key = argv[++i];
@@ -375,6 +417,28 @@ int main(int argc, char* argv[])
 			maxcalls_mode = true;
 		}
 	}
+
+#ifdef _WIN32
+	if (!tun_name.empty())
+	{
+		std::cerr << "Error: --tun-name is only available on Linux" << std::endl;
+		return 1;
+	}
+#else
+	if (!tap_guid.empty())
+	{
+		std::cerr << "Error: --tap-guid is only available on Windows" << std::endl;
+		return 1;
+	}
+	if (tun_name.empty())
+		tun_name = "tun0";
+	if (!is_valid_tun_name(tun_name))
+	{
+		std::cerr << "Error: --tun-name must contain 1-15 letters, digits, '.', '_' or '-'"
+		          << std::endl;
+		return 1;
+	}
+#endif
 
 	if (max_token.empty())
 	{
@@ -496,6 +560,14 @@ int main(int argc, char* argv[])
 	setup_state auto_state;
 	std::string maxcalls_bind_ip; // physical uplink IP the maxcalls transport binds to
 	std::function<bool(const std::string&)> maxcalls_address_callback;
+	std::string adapter_identifier;
+
+#ifdef _WIN32
+	adapter_identifier = tap_guid;
+#else
+	adapter_identifier = tun_name;
+	auto_state.tun_interface = tun_name;
+#endif
 
 	if (!vpn_ip.empty())
 	{
@@ -647,7 +719,7 @@ int main(int argc, char* argv[])
 		}
 
 		// Create VPN interface
-		auto vpn = std::make_shared<vpn_interface>(tunnel);
+		auto vpn = std::make_shared<vpn_interface>(tunnel, adapter_identifier);
 
 		if (!maxcalls_mode)
 		{
@@ -660,7 +732,14 @@ int main(int argc, char* argv[])
 		// Configure the VPN interface before starting the transport. On Windows
 		// this also removes stale full-tunnel routes from the selected TAP before
 		// maxcalls performs its first DNS lookup.
-		std::cout << "[VPN] Starting VPN interface on " << vpn_ip << "..." << std::endl;
+		std::cout << "[VPN] Starting VPN interface on " << vpn_ip;
+#ifdef _WIN32
+		if (!tap_guid.empty())
+			std::cout << " using TAP " << tap_guid;
+#else
+		std::cout << " using TUN " << tun_name;
+#endif
+		std::cout << "..." << std::endl;
 		if (!vpn->start(vpn_ip, vpn_mask, vpn_gw))
 		{
 			std::cerr << "Failed to start VPN interface. Make sure you have "

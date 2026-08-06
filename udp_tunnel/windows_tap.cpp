@@ -2,8 +2,10 @@
 
 #define WIN32_LEAN_AND_MEAN 
 
+#include <algorithm>
 #include <iostream>
 #include <array>
+#include <cctype>
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -37,6 +39,21 @@ namespace dixelu
 {
 namespace udp
 {
+
+namespace
+{
+
+std::string normalize_guid(std::string value)
+{
+	value.erase(std::remove(value.begin(), value.end(), '{'), value.end());
+	value.erase(std::remove(value.begin(), value.end(), '}'), value.end());
+	std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+		return static_cast<char>(std::tolower(c));
+	});
+	return value;
+}
+
+} // namespace
 
 TapAdapter::TapAdapter() :
 	handle_(INVALID_HANDLE_VALUE)
@@ -143,6 +160,31 @@ bool TapAdapter::open(const std::string& device_guid_in)
 		adapter_name_ = adapters[0].first;
 		device_guid = adapters[0].second;
 		std::cout << "Found TAP adapter: " << adapter_name_ << " (" << device_guid << ")" << std::endl;
+	}
+	else
+	{
+		const auto adapters = get_all_tap_adapters();
+		const auto requested_guid = normalize_guid(device_guid);
+		const auto selected = std::find_if(adapters.begin(), adapters.end(),
+			[&requested_guid](const auto& adapter) {
+				return normalize_guid(adapter.second) == requested_guid;
+			});
+
+		if (selected == adapters.end())
+		{
+			std::cerr << "TAP-Windows adapter GUID not found: " << device_guid << std::endl;
+			if (!adapters.empty())
+			{
+				std::cerr << "Available TAP adapters:" << std::endl;
+				for (const auto& [name, guid] : adapters)
+					std::cerr << "  " << name << " (" << guid << ")" << std::endl;
+			}
+			return false;
+		}
+
+		adapter_name_ = selected->first;
+		device_guid = selected->second;
+		std::cout << "Using TAP adapter: " << adapter_name_ << " (" << device_guid << ")" << std::endl;
 	}
 
 	adapter_guid_ = device_guid;

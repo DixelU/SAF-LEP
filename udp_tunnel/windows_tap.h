@@ -18,7 +18,8 @@ public:
 	TapAdapter();
 	~TapAdapter();
 
-	// Open the first available TAP-Windows adapter
+	// Open the requested TAP-Windows adapter by GUID, or the first available
+	// adapter when device_guid is empty.
 	bool open(const std::string& device_guid = "");
 
 	// Configure IP address and subnet mask

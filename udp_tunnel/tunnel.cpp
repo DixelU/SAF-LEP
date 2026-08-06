@@ -1162,8 +1162,10 @@ void p2p_tunnel::update_peer_activity(const boost::asio::ip::udp::endpoint& endp
 }
 
 // VPN Interface Implementation
-vpn_interface::vpn_interface(std::shared_ptr<tunnel_interface> tunnel)
+vpn_interface::vpn_interface(std::shared_ptr<tunnel_interface> tunnel,
+	std::string adapter_identifier)
 	: tunnel_(std::move(tunnel))
+	, adapter_identifier_(std::move(adapter_identifier))
 #ifdef _WIN32
 	, tap_adapter_(std::make_unique<TapAdapter>())
 #elif defined(__ANDROID__)
@@ -1186,7 +1188,7 @@ bool vpn_interface::start(const std::string& ip, const std::string& mask, const 
 
 #ifdef _WIN32
 	// Open TAP adapter
-	if (!tap_adapter_->open())
+	if (!tap_adapter_->open(adapter_identifier_))
 	{
 		std::cerr << "Failed to open TAP adapter" << std::endl;
 		running_ = false;
@@ -1226,7 +1228,7 @@ bool vpn_interface::start(const std::string& ip, const std::string& mask, const 
 
 #else
 	// Open TUN adapter
-	if (!tun_adapter_->open())
+	if (!tun_adapter_->open(adapter_identifier_.empty() ? "tun0" : adapter_identifier_))
 	{
 		std::cerr << "Failed to open TUN adapter" << std::endl;
 		running_ = false;

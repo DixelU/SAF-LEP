@@ -308,6 +308,48 @@ direct UDP -s mode, --max-wait does **not** automatically enable forwarding or
 NAT. If it is meant to act as an Internet exit node, configure OS forwarding,
 firewall rules, and masquerading/NAT on that machine separately.
 
+### Running direct UDP and MaxTunnel as separate services
+
+A server can keep an ordinary UDP tunnel and an emergency MaxTunnel endpoint
+running as two independent SAF-LEP processes. Each process must own a different
+TUN/TAP adapter and a different VPN subnet. On Linux, for example:
+
+~~~bash
+# Ordinary UDP service on 192.44.0.0/24.
+sudo ./build/SAF-LEP -s -p 14578 --tun-name safudp0 \
+  --ip 192.44.0.1 --mask 255.255.255.0 -k "udp seed"
+
+# Emergency MAX service on 192.45.0.0/24.
+sudo ./build/SAF-LEP --max-wait --raw --tun-name safmax0 \
+  --ip 192.45.0.1 --mask 255.255.255.0 -k "max seed"
+~~~
+
+Supplying `--ip` deliberately keeps both processes in legacy/manual networking
+mode. Configure IPv4 forwarding, firewall policy, and NAT persistently outside
+SAF-LEP for both `safudp0` and `safmax0`. Do not run two automatic server
+setups and rely on each process to own shared MASQUERADE or MSS-clamping rules:
+stopping either process could remove rules still needed by the other.
+
+The corresponding client configurations are:
+
+~~~bash
+# Normal path. Run one full-tunnel client at a time.
+sudo ./build/SAF-LEP -c vpn.example.net:14578 \
+  --ip 192.44.0.4 --mask 255.255.255.0 --gw 192.44.0.1 -k "udp seed"
+
+# Emergency path when MAX infrastructure is reachable but ordinary UDP is not.
+sudo ./build/SAF-LEP --max-call PEER_EXTERNAL_ID --raw \
+  --ip 192.45.0.4 --mask 255.255.255.0 --gw 192.45.0.1 -k "max seed"
+~~~
+
+Stop the active full-tunnel client before starting the other one so their `/1`
+default-route overrides do not compete. Switching between these independent
+VPN subnets is a reconnect and does not preserve existing TCP sessions.
+
+On Windows, install two TAP-Windows adapters and pass each process the desired
+adapter's interface GUID with `--tap-guid`. Windows server forwarding and NAT
+remain manually administered.
+
 ## Android client
 
 The Android application is a direct-UDP client. In the UI, configure:
@@ -369,6 +411,8 @@ VPN:
       --ip IP                     VPN address; selects manual mode
       --mask MASK                 VPN subnet mask
       --gw GATEWAY                VPN gateway; non-empty means full IPv4 tunnel
+      --tun-name NAME             Linux TUN device name; default: tun0
+      --tap-guid GUID             Windows TAP adapter GUID; default: first TAP
 
 MaxTunnel (desktop only):
       --max-qr-bootstrap          Bootstrap a MAX token using a QR link
@@ -419,7 +463,7 @@ unless -k is non-empty.
 
 - Install TAP-Windows and run from an elevated terminal.
 - Check that an adapter exists and, if necessary, give it an ASCII-only name.
-- SAF-LEP currently selects the first matching TAP adapter.
+- SAF-LEP selects the first matching TAP adapter unless `--tap-guid` is given.
 
 **Android connects but no packets return**
 
@@ -448,4 +492,3 @@ A production security design should replace the current transform with an
 authenticated-encryption construction, use a real password KDF or negotiated
 session keys, bind peer identity to authentication, prevent nonce reuse, and
 include replay protection.
-
