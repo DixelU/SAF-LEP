@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -144,6 +145,25 @@ struct tunnel_stats
 	}
 };
 
+struct checked_fragment_mask : std::vector<uint8_t>
+{
+	using std::vector<uint8_t>::vector;
+
+	uint8_t& operator[](size_t index)
+	{
+		if (index >= size()) [[unlikely]]
+			throw std::out_of_range("Fragment index exceeds reassembly mask");
+		return std::vector<uint8_t>::operator[](index);
+	}
+
+	const uint8_t& operator[](size_t index) const
+	{
+		if (index >= size()) [[unlikely]]
+			throw std::out_of_range("Fragment index exceeds reassembly mask");
+		return std::vector<uint8_t>::operator[](index);
+	}
+};
+
 struct fragment_assembly
 {
 	std::vector<uint8_t> data;
@@ -151,7 +171,7 @@ struct fragment_assembly
 	size_t total_expected_bytes = 0;
 	uint8_t total_frags = 0;
 	uint8_t received_frags_count = 0;
-	std::vector<uint8_t> received_frags_mask;
+	checked_fragment_mask received_frags_mask;
 	std::chrono::steady_clock::time_point first_frag_time;
 	std::chrono::steady_clock::time_point last_request_time;
 	uint8_t request_count = 0;
