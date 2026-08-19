@@ -76,20 +76,18 @@ public:
 	bool set_status(bool connected);
 
 	/**
-	 * Close the file descriptor.
-	 * Note: Normally, the Java layer should close the ParcelFileDescriptor.
-	 * Only call this if explicitly taking ownership.
+	 * Close the duplicated native file descriptor.
+	 * Java retains ownership of the original ParcelFileDescriptor.
 	 */
 	void close_fd();
 
 	/**
 	 * Get the raw file descriptor (for socket protection via JNI callback).
 	 */
-	int get_fd() const { return fd_; }
+	int get_fd() const { return fd_.load(); }
 
 private:
-	int fd_;
-	std::atomic<bool> owns_fd_;  // Whether we should close the FD on destruction
+	std::atomic<int> fd_;
 };
 
 // Type alias for compatibility with existing code

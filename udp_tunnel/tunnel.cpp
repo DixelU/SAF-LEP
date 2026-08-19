@@ -53,6 +53,9 @@ p2p_tunnel::~p2p_tunnel()
 
 void p2p_tunnel::start()
 {
+	if (scheme_ == encode_scheme::raw && !lep::crypto::has_key(encryption_key_))
+		throw std::runtime_error("Raw packet encoding requires an encryption seed key");
+
 	if (running_.exchange(true))
 		return;
 
@@ -164,6 +167,12 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 					receive_buffer_.data(), bytes_transferred);
 				break;
 			}
+			case encode_scheme::raw:
+			{
+				decoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_packet>::decode(
+					receive_buffer_.data(), bytes_transferred);
+				break;
+			}
 		}
 
 		// Decrypt after LEP decoding (using packet index from LEP header)
@@ -213,6 +222,36 @@ void p2p_tunnel::handle_maintenance(const boost::system::error_code& error)
 	for (auto& peer : peers)
 		run_peer_maintenance(*peer);
 
+	// Evict stale learned peers. Every NAT rebind or stray datagram creates a
+	// peer_connection; without eviction these linger forever and run_peer_maintenance
+	// re-probes each one every reconnect_probe_interval_ seconds indefinitely, so
+	// peers_ grows without bound and the probe traffic climbs over a long session.
+	// Persistent peers (explicit connect_to_peer targets) are kept so the client
+	// keeps trying to reach its configured server.
+	{
+		auto now = std::chrono::steady_clock::now();
+		std::lock_guard<std::recursive_mutex> lock(peers_mutex_);
+		for (auto it = peers_.begin(); it != peers_.end(); )
+		{
+			auto& peer = *it->second;
+			bool evict = false;
+			{
+				std::lock_guard<std::mutex> plock(peer.mutex);
+				auto silence = std::chrono::duration_cast<std::chrono::seconds>(now - peer.last_seen).count();
+				evict = !peer.persistent && !peer.is_connected &&
+					silence >= peer_eviction_timeout_;
+			}
+
+			if (evict)
+			{
+				stats_.add_log("[Tunnel] Evicting stale peer: " + endpoint_to_string(it->second->endpoint));
+				it = peers_.erase(it);
+			}
+			else
+				++it;
+		}
+	}
+
 	start_maintenance();
 }
 
@@ -225,6 +264,15 @@ void p2p_tunnel::broadcast(const std::vector<uint8_t>& data)
 	// Actually send_to_peer_async is thread safe for global peers map access, 
 	// but we need a snapshot of connected peers.
 	auto connected_peers = get_connected_peers();
+	if (connected_peers.empty())
+	{
+		// Nothing to send to: the OS is still feeding us packets off the adapter
+		// (full-tunnel routes point at TAP), so a rising drop count while the link
+		// is flapping points the finger at an adapter-side loop, not the socket.
+		stats_.broadcast_drops++;
+		return;
+	}
+
 	for (const auto& peer : connected_peers)
 		send_to_peer_async(data, peer);
 }
@@ -290,6 +338,13 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 		if (decoded.data.size() >= 1)
 			handle_control_packet(peer, decoded);
 	}
+	else if (decoded.data[5] == 0)
+	{
+		// Long-form control packet. A real data fragment always carries total_frags >= 1,
+		// so a zero at offset 5 unambiguously marks an extended control message (such as
+		// a fragment-level RRQ) and never collides with the data path below.
+		handle_long_control_packet(peer, decoded);
+	}
 	else
 	{
 		uint32_t packet_id = get_u32(decoded.data, 0);
@@ -303,9 +358,10 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 		{
 			std::lock_guard<std::mutex> lock(peer.mutex);
 
-			// Gap detection
-			process_packet_gap(peer, packet_id);
-			
+			// Gap detection runs from the 1s maintenance sweep (run_peer_maintenance),
+			// not here: every threshold in process_packet_gap is measured in seconds,
+			// so per-fragment invocation gave no benefit and, now that the sweep is
+			// uncapped, would cost O(n) per arriving fragment.
 			if (packet_id > peer.last_received_index)
 				peer.last_received_index = packet_id;
 
@@ -366,6 +422,9 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 		// Call callback outside lock
 		if (!completed_packet.empty())
 		{
+			if (completed_packet.size() == 1 && completed_packet[0] == 0x00)
+				return;
+
 			stats_.packets_received++;
 			stats_.add_event(packet_event_type::received, packet_id, completed_packet.size(), endpoint_to_string(remote_endpoint_));
 
@@ -449,10 +508,7 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 
 			uint32_t req_id = get_u32(decoded.data, 1);
 			auto iter = peer.storage.upper_bound(req_id);
-			if (iter == peer.storage.end())
-				return;
-
-			peer.storage.erase(peer.storage.begin(), iter);
+			peer.storage.erase(peer.storage.begin(), iter == peer.storage.end() ? peer.storage.end() : iter);
 
 			break;
 		}
@@ -482,6 +538,66 @@ void p2p_tunnel::handle_control_packet(peer_connection& peer, dixelu::lep::packe
 	}
 }
 
+void p2p_tunnel::handle_long_control_packet(peer_connection& peer, dixelu::lep::packet& decoded)
+{
+	// Long-control framing: [packet_id:4][sub_type:1][0x00 marker:1][payload...].
+	// Reached from handle_fragmentation when byte[5] == 0, which a real data fragment
+	// can never be, so an arbitrary-length control message is safe here.
+	if (decoded.data.size() < 7)
+		return;
+
+	uint8_t sub_type = decoded.data[4];
+
+	switch (sub_type)
+	{
+		case PAC_RRQ:
+		{
+			// Fragment-level re-request: resend only the listed fragment indices instead
+			// of the whole packet, so a single lost fragment costs a single retransmit.
+			uint32_t req_id = get_u32(decoded.data, 0);
+			stats_.retransmit_requests++;
+			stats_.add_event(packet_event_type::retransmit_requested, req_id, 0, endpoint_to_string(peer.endpoint));
+
+			if (VERBOSE_MODE)
+			{
+				std::cout << "[Tunnel] Received fragment RRQ for packet " << req_id
+				          << " (" << (decoded.data.size() - 6) << " frags)" << std::endl;
+				stats_.add_log("[Tunnel] Frag RRQ for packet " + std::to_string(req_id));
+			}
+
+			std::lock_guard<std::mutex> lock(peer.mutex);
+			auto it = peer.storage.find(req_id);
+			if (it == peer.storage.end())
+			{
+				std::vector<uint8_t> id_bytes(decoded.data.begin(), decoded.data.begin() + 4);
+				send_control_packet(peer, PAC_LST, id_bytes);
+				return;
+			}
+
+			stats_.add_event(packet_event_type::retransmitted, req_id, 0, endpoint_to_string(peer.endpoint));
+			for (size_t i = 6; i < decoded.data.size(); ++i)
+			{
+				uint8_t frag = decoded.data[i];
+				if (frag >= it->second.size())
+					continue;
+
+				auto buffer = std::make_shared<std::vector<uint8_t>>(it->second[frag].data);
+				socket_.async_send_to(
+					boost::asio::buffer(*buffer),
+					peer.endpoint,
+					[this, buffer, endpoint = peer.endpoint](const boost::system::error_code& error, std::size_t bytes_transferred)
+				{
+					handle_send(error, bytes_transferred, buffer, endpoint);
+				});
+			}
+
+			break;
+		}
+		default:
+			break;
+	}
+}
+
 void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const std::vector<uint8_t>& extra_data)
 {
 	std::vector<uint8_t> payload;
@@ -489,18 +605,20 @@ void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const 
 	payload.push_back(type);
 	payload.insert(payload.end(), extra_data.begin(), extra_data.end());
 
-	// Encode with next index
-	uint32_t index;
-	{
-		// Assumes peer.mutex is ALREADY LOCKED by the caller
-		// std::lock_guard<std::mutex> lock(peer.mutex);
-		// Control packets consume an index sequence to keep LEP encryption synchronized
-		index = peer.next_send_index++;
-	}
+	send_raw_control(peer, std::move(payload));
+}
+
+void p2p_tunnel::send_raw_control(peer_connection& peer, std::vector<uint8_t> payload)
+{
+	// Assumes peer.mutex is ALREADY LOCKED by the caller. Control packets consume an
+	// index sequence to keep LEP encryption synchronized. Unlike send_control_packet,
+	// the payload is sent verbatim (no leading type byte prepended), so callers can
+	// place the long-control marker (byte[5] == 0) exactly where the receiver's
+	// data/control dispatch expects it.
+	uint32_t index = peer.next_send_index++;
 
 	// Encrypt payload before LEP encoding
 	lep::crypto::transform(encryption_key_, index, payload);
-
 
 	std::vector<std::uint8_t> encoded;
 	switch (scheme_)
@@ -514,6 +632,12 @@ void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const 
 		case encode_scheme::lep_v1:
 		{
 			encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_lep_v1>::encode(
+				payload.data(), payload.size(), index);
+			break;
+		}
+		case encode_scheme::raw:
+		{
+			encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_packet>::encode(
 				payload.data(), payload.size(), index);
 			break;
 		}
@@ -531,17 +655,41 @@ void p2p_tunnel::send_control_packet(peer_connection& peer, uint8_t type, const 
 	}
 }
 
+void p2p_tunnel::reset_peer_session_locked(peer_connection& peer)
+{
+	for (const auto& [packet_id, assembly] : peer.reassembly_buffer)
+	{
+		if (assembly.received_frags_count == assembly.total_frags)
+			continue;
+
+		stats_.packets_lost++;
+		stats_.add_event(packet_event_type::lost, packet_id, 0, endpoint_to_string(peer.endpoint));
+	}
+
+	peer.next_send_index = 0;
+	peer.last_received_index = 0;
+	peer.reassembly_buffer.clear();
+	peer.reassembly_in_progress.clear();
+	peer.late_reassembly.clear();
+	peer.storage.clear();
+}
+
 void p2p_tunnel::internal_cleanup_procedure(peer_connection& peer)
 {
 	auto curr = std::chrono::steady_clock::now();
-
-	constexpr auto N = 5;
-	uint32_t ids[N]{};
-	uint8_t size = 0;
+	std::vector<uint32_t> ids_to_erase;
+	uint32_t ack_max = 0;
+	bool has_ack = false;
 
 	std::lock_guard<std::mutex> lock(peer.mutex);
 
-	// remove all packets that have all request results satified and for which RRQs wont be sent again
+	uint32_t lowest_pending = std::numeric_limits<uint32_t>::max();
+	for (auto id : peer.reassembly_in_progress)
+		lowest_pending = (std::min)(lowest_pending, id);
+	for (auto id : peer.late_reassembly)
+		lowest_pending = (std::min)(lowest_pending, id);
+
+	// Only acknowledge a safe prefix below the lowest still-pending packet.
 	for (auto& [id, data] : peer.reassembly_buffer)
 	{
 		if (data.received_frags_count != data.total_frags)
@@ -555,23 +703,29 @@ void p2p_tunnel::internal_cleanup_procedure(peer_connection& peer)
 		if (peer.reassembly_in_progress.contains(id) || peer.late_reassembly.contains(id))
 			continue;
 
-		ids[size++] = id;
-		if (size == N)
-			break;
+		if (lowest_pending != std::numeric_limits<uint32_t>::max() && id >= lowest_pending)
+			continue;
+
+		ids_to_erase.push_back(id);
+		if (!has_ack || id > ack_max)
+		{
+			ack_max = id;
+			has_ack = true;
+		}
 	}
 
-	if (size > 0)
+	if (has_ack)
 	{
 		std::vector<uint8_t> req_data;
-		req_data.push_back((*ids >> 24) & 0xFF);
-		req_data.push_back((*ids >> 16) & 0xFF);
-		req_data.push_back((*ids >> 8) & 0xFF);
-		req_data.push_back(*ids & 0xFF);
+		req_data.push_back((ack_max >> 24) & 0xFF);
+		req_data.push_back((ack_max >> 16) & 0xFF);
+		req_data.push_back((ack_max >> 8) & 0xFF);
+		req_data.push_back(ack_max & 0xFF);
 		send_control_packet(peer, PAC_LTR, req_data);
 	}
 
-	while (size-- > 0)
-		peer.reassembly_buffer.erase(ids[size]);
+	for (auto id : ids_to_erase)
+		peer.reassembly_buffer.erase(id);
 }
 
 void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
@@ -587,11 +741,14 @@ void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
 	{
 		// No need for reassembly_mutex_ anymore, everything is in peer
 		
-		auto packets = peer.reassembly_in_progress | std::views::take(10) | std::ranges::to<std::vector>();
-		auto late_packets_view = peer.late_reassembly | std::views::take(10);
-		for (auto& el : late_packets_view)
-			packets.push_back(el);
-		// Gather candidates: top 10 from progress + top 10 from late
+		// Process the FULL set of pending reassemblies, not just a prefix.
+		// Capping this at 10 starved both re-request and timeout cleanup under
+		// sustained loss: reassembly_in_progress grew faster than 10/tick could
+		// drain it, so the backlog (and the stuck re-request loop) persisted until
+		// a manual restart. Per-packet backoff in the loop below still rate-limits
+		// the actual RRQs, so iterating everything here is safe.
+		auto packets = peer.reassembly_in_progress | std::ranges::to<std::vector>();
+		packets.insert(packets.end(), peer.late_reassembly.begin(), peer.late_reassembly.end());
 
 		for (auto& pid: packets)
 		{
@@ -647,15 +804,46 @@ void p2p_tunnel::process_packet_gap(peer_connection& peer, uint32_t packet_id)
 	
 	for (auto& id : late_packets)
 	{
-		std::vector<uint8_t> req_data;
-		req_data.push_back((id >> 24) & 0xFF);
-		req_data.push_back((id >> 16) & 0xFF);
-		req_data.push_back((id >> 8) & 0xFF);
-		req_data.push_back(id & 0xFF);
-		send_control_packet(peer, PAC_RRQ, req_data);
+		std::vector<uint8_t> id_bytes;
+		id_bytes.push_back((id >> 24) & 0xFF);
+		id_bytes.push_back((id >> 16) & 0xFF);
+		id_bytes.push_back((id >> 8) & 0xFF);
+		id_bytes.push_back(id & 0xFF);
+
+		// Enumerate the fragments we are actually missing. The mask is right here, so a
+		// single hole no longer drags the whole packet back across the wire.
+		std::vector<uint8_t> missing;
+		auto it = peer.reassembly_buffer.find(id);
+		if (it != peer.reassembly_buffer.end())
+		{
+			const auto& mask = it->second.received_frags_mask;
+			for (size_t f = 0; f < mask.size(); ++f)
+				if (!mask[f])
+					missing.push_back(static_cast<uint8_t>(f));
+
+			// Past half-missing, listing every index costs more than just resending all.
+			if (missing.size() > mask.size() / 2)
+				missing.clear();
+		}
+
+		if (!missing.empty())
+		{
+			// Fragment RRQ: [id:4][PAC_RRQ][0x00 marker][missing frags...]
+			std::vector<uint8_t> payload = id_bytes;
+			payload.push_back(PAC_RRQ);
+			payload.push_back(0x00);
+			payload.insert(payload.end(), missing.begin(), missing.end());
+			send_raw_control(peer, std::move(payload));
+		}
+		else
+		{
+			// Whole-packet RRQ (legacy 5-byte form): resend everything.
+			send_control_packet(peer, PAC_RRQ, id_bytes);
+		}
 
 		if (VERBOSE_MODE)
-			std::cout << "[Tunnel] Detected gap, requesting ID: " << id << std::endl;
+			std::cout << "[Tunnel] Detected gap, requesting ID: " << id
+			          << " (" << (missing.empty() ? std::string("all") : std::to_string(missing.size()) + " frags") << ")" << std::endl;
 	}
 }
 
@@ -671,20 +859,7 @@ void p2p_tunnel::run_peer_maintenance(peer_connection& peer)
 		if (peer.is_connected && silence >= peer_silence_timeout_)
 		{
 			peer.is_connected = false;
-
-			for (const auto& [packet_id, assembly] : peer.reassembly_buffer)
-			{
-				if (assembly.received_frags_count == assembly.total_frags)
-					continue;
-
-				stats_.packets_lost++;
-				stats_.add_event(packet_event_type::lost, packet_id, 0, endpoint_to_string(peer.endpoint));
-			}
-
-			peer.reassembly_buffer.clear();
-			peer.reassembly_in_progress.clear();
-			peer.late_reassembly.clear();
-			peer.storage.clear();
+			reset_peer_session_locked(peer);
 
 			stats_.add_log("[Tunnel] Peer timed out: " + endpoint_to_string(peer.endpoint));
 		}
@@ -776,6 +951,12 @@ void p2p_tunnel::send_fragments(peer_connection& peer_conn, uint32_t packet_id, 
 					payload.data(), payload.size(), packet_id);
 				break;
 			}
+			case encode_scheme::raw:
+			{
+				encoded = dixelu::lep::low_entropy_protocol<dixelu::lep::raw_packet>::encode(
+					payload.data(), payload.size(), packet_id);
+				break;
+			}
 		}
 
 		if (encoded.empty())
@@ -859,6 +1040,8 @@ void p2p_tunnel::connect_to_peer(const boost::asio::ip::udp::endpoint& endpoint)
 	auto& peer = get_or_create_peer(endpoint);
 	{
 		std::lock_guard<std::mutex> locker(peer.mutex);
+		reset_peer_session_locked(peer);
+		peer.persistent = true;
 		peer.is_connected = true;
 		peer.last_seen = std::chrono::steady_clock::now();
 		peer.last_probe_time = std::chrono::steady_clock::now();
@@ -881,6 +1064,13 @@ boost::asio::ip::udp::endpoint p2p_tunnel::get_local_endpoint() const
 	return local_endpoint_;
 }
 
+#if defined(__ANDROID__)
+int p2p_tunnel::get_socket_fd()
+{
+	return socket_.is_open() ? socket_.native_handle() : -1;
+}
+#endif
+
 void p2p_tunnel::set_packet_received_callback(packet_received_callback cb)
 {
 	packet_callback_ = std::move(cb);
@@ -895,6 +1085,8 @@ void p2p_tunnel::set_encryption_key(const std::string& seed_key)
 {
 	if (seed_key.empty())
 	{
+		if (scheme_ == encode_scheme::raw)
+			throw std::invalid_argument("Raw packet encoding cannot be used without encryption");
 		encryption_key_ = {};
 		return;
 	}
@@ -923,6 +1115,12 @@ std::vector<boost::asio::ip::udp::endpoint> p2p_tunnel::get_connected_peers() co
 	}
 
 	return result;
+}
+
+size_t p2p_tunnel::get_peer_count() const
+{
+	std::lock_guard<std::recursive_mutex> lock(peers_mutex_);
+	return peers_.size();
 }
 
 bool p2p_tunnel::is_peer_connected(const boost::asio::ip::udp::endpoint& peer) const
@@ -956,13 +1154,22 @@ void p2p_tunnel::update_peer_activity(const boost::asio::ip::udp::endpoint& endp
 	peer.last_seen = std::chrono::steady_clock::now();
 	if (!peer.is_connected)
 	{
+		reset_peer_session_locked(peer);
 		peer.is_connected = true;
+		peer.last_probe_time = std::chrono::steady_clock::time_point{};
+		stats_.add_log("[Tunnel] Peer session reset: " + endpoint_to_string(endpoint));
 	}
 }
 
 // VPN Interface Implementation
-vpn_interface::vpn_interface(std::shared_ptr<p2p_tunnel> tunnel)
+vpn_interface::vpn_interface(std::shared_ptr<tunnel_interface> tunnel,
+	std::string adapter_identifier,
+	forwarding_mode forwarding,
+	bool learn_peer_routes)
 	: tunnel_(std::move(tunnel))
+	, adapter_identifier_(std::move(adapter_identifier))
+	, forwarding_mode_(forwarding)
+	, learn_peer_routes_(learn_peer_routes)
 #ifdef _WIN32
 	, tap_adapter_(std::make_unique<TapAdapter>())
 #elif defined(__ANDROID__)
@@ -983,9 +1190,12 @@ bool vpn_interface::start(const std::string& ip, const std::string& mask, const 
 	if (running_.exchange(true))
 		return true;
 
+	if (forwarding_mode_ == forwarding_mode::route)
+		subnet_broadcast_key_ = routing::subnet_broadcast_key(ip, mask);
+
 #ifdef _WIN32
 	// Open TAP adapter
-	if (!tap_adapter_->open())
+	if (!tap_adapter_->open(adapter_identifier_))
 	{
 		std::cerr << "Failed to open TAP adapter" << std::endl;
 		running_ = false;
@@ -1025,7 +1235,7 @@ bool vpn_interface::start(const std::string& ip, const std::string& mask, const 
 
 #else
 	// Open TUN adapter
-	if (!tun_adapter_->open())
+	if (!tun_adapter_->open(adapter_identifier_.empty() ? "tun0" : adapter_identifier_))
 	{
 		std::cerr << "Failed to open TUN adapter" << std::endl;
 		running_ = false;
@@ -1085,10 +1295,146 @@ void vpn_interface::stop()
 	if (!running_.exchange(false))
 		return;
 
+	#if defined(__ANDROID__)
+	// Wake the poll/read loop before destroying the adapter it references.
+	tun_adapter_->close_fd();
+	#endif
+
 	if (read_thread_.joinable())
 	{
-		read_thread_.detach(); 
+		#if defined(__ANDROID__)
+		read_thread_.join();
+		#else
+		read_thread_.detach();
+		#endif
 	}
+
+	std::lock_guard<std::mutex> lock(routes_mutex_);
+	routes_ = {};
+	route_endpoints_.clear();
+}
+
+std::string vpn_interface::endpoint_key(const boost::asio::ip::udp::endpoint& endpoint)
+{
+	return endpoint.address().to_string() + "|" + std::to_string(endpoint.port());
+}
+
+bool vpn_interface::learn_peer_route(const routing::ip_packet_info& packet,
+	const boost::asio::ip::udp::endpoint& from)
+{
+	if (!routing::has_usable_source(packet))
+	{
+		tunnel_->get_stats().route_drops++;
+		return false;
+	}
+
+	const std::string address = routing::source_key(packet);
+	const std::string peer = endpoint_key(from);
+	const auto connected_peers = tunnel_->get_connected_peers();
+
+	std::lock_guard<std::mutex> lock(routes_mutex_);
+	auto result = routes_.learn(address, peer);
+	if (result == routing::learn_result::address_conflict)
+	{
+		const auto old_peer = routes_.peer_for(address);
+		bool old_peer_connected = false;
+		if (old_peer)
+		{
+			const auto old_endpoint = route_endpoints_.find(*old_peer);
+			if (old_endpoint != route_endpoints_.end())
+			{
+				old_peer_connected = std::ranges::find(connected_peers, old_endpoint->second) != connected_peers.end();
+			}
+		}
+
+		if (old_peer && !old_peer_connected)
+		{
+			routes_.erase_peer(*old_peer);
+			route_endpoints_.erase(*old_peer);
+			result = routes_.learn(address, peer);
+		}
+	}
+
+	if (result == routing::learn_result::address_conflict || result == routing::learn_result::peer_conflict)
+	{
+		auto& stats = tunnel_->get_stats();
+		const uint64_t conflicts = ++stats.route_conflicts;
+		stats.route_drops++;
+		if (conflicts <= 5 || (conflicts & (conflicts - 1)) == 0)
+			stats.add_log("[Route] Rejected duplicate VPN address claim from " + peer);
+		return false;
+	}
+
+	route_endpoints_[peer] = from;
+	if (result == routing::learn_result::learned)
+		tunnel_->get_stats().add_log("[Route] Learned VPN address for " + peer);
+	return true;
+}
+
+void vpn_interface::route_adapter_packet(const std::vector<uint8_t>& data)
+{
+	const auto packet = routing::inspect_ip_packet(data);
+	if (!packet)
+	{
+		tunnel_->get_stats().route_drops++;
+		return;
+	}
+
+	const std::string destination = routing::destination_key(*packet);
+	if (routing::has_group_destination(*packet) ||
+		(subnet_broadcast_key_ && destination == *subnet_broadcast_key_))
+	{
+		tunnel_->broadcast(data);
+		return;
+	}
+
+	std::optional<boost::asio::ip::udp::endpoint> target;
+	std::optional<std::string> target_peer;
+	{
+		std::lock_guard<std::mutex> lock(routes_mutex_);
+		target_peer = routes_.peer_for(destination);
+		if (target_peer)
+		{
+			const auto endpoint = route_endpoints_.find(*target_peer);
+			if (endpoint != route_endpoints_.end())
+				target = endpoint->second;
+		}
+	}
+
+	const auto connected_peers = tunnel_->get_connected_peers();
+	if (target)
+	{
+		if (std::ranges::find(connected_peers, *target) != connected_peers.end())
+		{
+			tunnel_->send_to_peer_async(data, *target);
+			return;
+		}
+
+		std::lock_guard<std::mutex> lock(routes_mutex_);
+		routes_.erase_peer(*target_peer);
+		route_endpoints_.erase(*target_peer);
+		tunnel_->get_stats().route_drops++;
+		return;
+	}
+
+	// A connecting client has one upstream peer and cannot learn its route until
+	// the first reply arrives. This also handles a one-client server without
+	// duplicating traffic. Once multiple peers exist, unknown unicast fails closed.
+	if (!target_peer && connected_peers.size() == 1)
+	{
+		tunnel_->send_to_peer_async(data, connected_peers.front());
+		return;
+	}
+
+	tunnel_->get_stats().route_drops++;
+}
+
+void vpn_interface::forward_adapter_packet(const std::vector<uint8_t>& data)
+{
+	if (forwarding_mode_ == forwarding_mode::route)
+		route_adapter_packet(data);
+	else
+		tunnel_->broadcast(data);
 }
 
 void vpn_interface::read_from_tap()
@@ -1099,6 +1445,7 @@ void vpn_interface::read_from_tap()
 		auto packet = tap_adapter_->read();
 		if (!packet.empty())
 		{
+			tunnel_->get_stats().tap_bytes_in += packet.size();
 			// Windows TAP returns Ethernet frames. We need to strip the header for the tunnel (Layer 3).
 			// Ethernet header is 14 bytes: [Dest MAC(6)][Src MAC(6)][EtherType(2)]
 			if (packet.size() > 14)
@@ -1113,7 +1460,7 @@ void vpn_interface::read_from_tap()
 					if (VERBOSE_MODE)
 						std::cout << "[VPN] TAP -> Tunnel: IP packet size=" << ip_packet.size() << std::endl;
 
-					tunnel_->broadcast(ip_packet);
+					forward_adapter_packet(ip_packet);
 				}
 				else if (ether_type == 0x0806) // ARP
 				{
@@ -1132,8 +1479,8 @@ void vpn_interface::read_from_tap()
 		auto packet = tun_adapter_->read();
 		if (!packet.empty())
 		{
-			// Broadcast to all peers (simple hub mode)
-			tunnel_->broadcast(packet);
+			tunnel_->get_stats().tap_bytes_in += packet.size();
+			forward_adapter_packet(packet);
 		}
 #endif
 	}
@@ -1247,6 +1594,8 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 	if (!running_)
 		return;
 
+	tunnel_->get_stats().tap_bytes_out += data.size();
+
 	// Filter out control packets or too small packets (min IPv4 header is 20 bytes)
 	if (data.size() < 20)
 	{
@@ -1262,6 +1611,18 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 				std::cout << "[VPN] Dropping small packet: size=" << data.size() << std::endl;
 		}
 		return;
+	}
+
+	if (forwarding_mode_ == forwarding_mode::route && learn_peer_routes_)
+	{
+		const auto packet = routing::inspect_ip_packet(data);
+		if (!packet)
+		{
+			tunnel_->get_stats().route_drops++;
+			return;
+		}
+		if (!learn_peer_route(*packet, from))
+			return;
 	}
 
 	if (VERBOSE_MODE)

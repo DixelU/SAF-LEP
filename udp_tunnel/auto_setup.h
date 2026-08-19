@@ -8,6 +8,8 @@
 #include <functional>
 #include <atomic>
 #include <cstdint>
+#include <mutex>
+#include <unordered_set>
 
 namespace dixelu {
 namespace udp {
@@ -31,7 +33,21 @@ struct setup_state
 	std::string local_gateway_ip;          // Physical gateway for static route
 	std::string local_gateway_iface;       // (Linux only) e.g. "eth0"
 	bool static_route_added = false;
+
+	// maxcalls transport routing. Linux uses a source-policy table. Windows
+	// snapshots the physical route before enabling the VPN and owns temporary
+	// /32 routes for every dynamically discovered transport address.
+	std::string wan_local_ip;              // Source IP of the physical default route
+	std::string maxcalls_wan_gateway_ip;   // Windows physical next hop
+	uint32_t maxcalls_wan_interface_index = 0;
+	mutable std::mutex maxcalls_routes_mutex;
+	std::unordered_set<std::string> maxcalls_routes_added;
+	bool maxcalls_policy_added = false;
 };
+
+// Fixed routing table id used for the maxcalls transport bypass (Linux only).
+// A numeric id works without an /etc/iproute2/rt_tables entry.
+constexpr int MAXCALLS_POLICY_TABLE = 51821;
 
 // --- Platform detection ---
 
@@ -40,6 +56,20 @@ std::string detect_default_gateway();
 
 // Returns the WAN interface name (default route device). Empty on failure. Linux only.
 std::string detect_wan_interface();
+
+// Returns the local source IP the kernel uses to reach the internet over the
+// physical default route (e.g. "192.168.1.50"). Empty on failure. Linux only.
+std::string detect_wan_local_ip();
+
+// --- maxcalls transport routing ---
+//
+// Linux installs a source-based policy rule. Windows captures the physical
+// gateway/interface/source and bypasses any public DNS servers needed after the
+// full-tunnel routes are installed. AVTTS then reports each dynamically chosen
+// address through maxcalls_policy_add_transport_address().
+bool maxcalls_policy_setup(setup_state& state);
+bool maxcalls_policy_add_transport_address(setup_state& state, const std::string& address);
+void maxcalls_policy_teardown(setup_state& state);
 
 // --- DNS resolution ---
 

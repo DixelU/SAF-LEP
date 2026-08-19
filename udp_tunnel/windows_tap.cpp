@@ -2,8 +2,10 @@
 
 #define WIN32_LEAN_AND_MEAN 
 
+#include <algorithm>
 #include <iostream>
 #include <array>
+#include <cctype>
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -38,6 +40,21 @@ namespace dixelu
 namespace udp
 {
 
+namespace
+{
+
+std::string normalize_guid(std::string value)
+{
+	value.erase(std::remove(value.begin(), value.end(), '{'), value.end());
+	value.erase(std::remove(value.begin(), value.end(), '}'), value.end());
+	std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+		return static_cast<char>(std::tolower(c));
+	});
+	return value;
+}
+
+} // namespace
+
 TapAdapter::TapAdapter() :
 	handle_(INVALID_HANDLE_VALUE)
 {}
@@ -46,8 +63,23 @@ TapAdapter::~TapAdapter()
 {
 	if (handle_ != INVALID_HANDLE_VALUE)
 	{
+		remove_full_tunnel_routes();
 		CloseHandle(handle_);
 	}
+}
+
+void TapAdapter::remove_full_tunnel_routes()
+{
+	const uint32_t if_index = get_interface_index();
+	if (if_index == 0)
+		return;
+
+	// Remove only the two default-override routes attached to this TAP.
+	// A previous interrupted run can otherwise leave DNS and the MAX control
+	// connection routed into an unestablished tunnel on the next startup.
+	const std::string if_arg = " IF " + std::to_string(if_index);
+	system(("route delete 0.0.0.0 mask 128.0.0.0" + if_arg + " >NUL 2>&1").c_str());
+	system(("route delete 128.0.0.0 mask 128.0.0.0" + if_arg + " >NUL 2>&1").c_str());
 }
 
 std::vector<std::pair<std::string, std::string>> TapAdapter::get_all_tap_adapters()
@@ -129,6 +161,31 @@ bool TapAdapter::open(const std::string& device_guid_in)
 		device_guid = adapters[0].second;
 		std::cout << "Found TAP adapter: " << adapter_name_ << " (" << device_guid << ")" << std::endl;
 	}
+	else
+	{
+		const auto adapters = get_all_tap_adapters();
+		const auto requested_guid = normalize_guid(device_guid);
+		const auto selected = std::find_if(adapters.begin(), adapters.end(),
+			[&requested_guid](const auto& adapter) {
+				return normalize_guid(adapter.second) == requested_guid;
+			});
+
+		if (selected == adapters.end())
+		{
+			std::cerr << "TAP-Windows adapter GUID not found: " << device_guid << std::endl;
+			if (!adapters.empty())
+			{
+				std::cerr << "Available TAP adapters:" << std::endl;
+				for (const auto& [name, guid] : adapters)
+					std::cerr << "  " << name << " (" << guid << ")" << std::endl;
+			}
+			return false;
+		}
+
+		adapter_name_ = selected->first;
+		device_guid = selected->second;
+		std::cout << "Using TAP adapter: " << adapter_name_ << " (" << device_guid << ")" << std::endl;
+	}
 
 	adapter_guid_ = device_guid;
 	std::string device_path = "\\\\.\\Global\\" + device_guid + ".tap";
@@ -146,6 +203,11 @@ bool TapAdapter::open(const std::string& device_guid_in)
 
 bool TapAdapter::configure(const std::string& ip_address, const std::string& netmask, const std::string& gateway)
 {
+	// Always clear overrides left by a previous run before applying this run's
+	// routing policy. This is especially important for maxcalls split-tunnel
+	// mode, where no replacement default routes should exist.
+	remove_full_tunnel_routes();
+
 	// We will use netsh for simplicity to configure the IP
 	// Command: netsh interface ip set address "Adapter Name" static IP Mask Gateway
 

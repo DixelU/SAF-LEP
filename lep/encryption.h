@@ -19,6 +19,16 @@ namespace crypto
 // Key size for the encryption (256 bits)
 constexpr size_t KEY_SIZE = 32;
 
+inline bool has_key(const std::array<uint8_t, KEY_SIZE>& key)
+{
+	for (const uint8_t byte : key)
+	{
+		if (byte != 0)
+			return true;
+	}
+	return false;
+}
+
 // Simple hash-based key derivation from seed string
 // Uses a variant of DJB2 hash combined with mixing to produce KEY_SIZE bytes
 inline std::array<uint8_t, KEY_SIZE> derive_key(const std::string& seed)
@@ -137,18 +147,8 @@ inline void transform(
 	if (size == 0)
 		return;
 
-	// Check if key is all zeros (no encryption)
-	bool has_key = false;
-	for (size_t i = 0; i < KEY_SIZE; ++i)
-	{
-		if (key[i] != 0)
-		{
-			has_key = true;
-			break;
-		}
-	}
-
-	if (!has_key)
+	// An all-zero key explicitly selects the legacy unencrypted mode.
+	if (!has_key(key))
 		return;
 
 	cipher_state state(key);

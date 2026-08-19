@@ -3,6 +3,7 @@
 #if defined(__ANDROID__)
 
 #include <unistd.h>
+#include <poll.h>
 #include <errno.h>
 #include <cstring>
 
@@ -22,17 +23,12 @@ namespace udp
 
 AndroidTunAdapter::AndroidTunAdapter()
 	: fd_(-1)
-	, owns_fd_(false)
 {
 }
 
 AndroidTunAdapter::~AndroidTunAdapter()
 {
-	if (owns_fd_ && fd_ >= 0)
-	{
-		::close(fd_);
-		fd_ = -1;
-	}
+	close_fd();
 }
 
 bool AndroidTunAdapter::set_fd(int fd)
@@ -43,16 +39,18 @@ bool AndroidTunAdapter::set_fd(int fd)
 		return false;
 	}
 
-	// Close previous FD if we own it
-	if (owns_fd_ && fd_ >= 0)
+	const int duplicate = ::dup(fd);
+	if (duplicate < 0)
 	{
-		::close(fd_);
+		LOGE("Failed to duplicate TUN file descriptor: %s (errno=%d)", strerror(errno), errno);
+		return false;
 	}
 
-	fd_ = fd;
-	owns_fd_ = false;  // Java owns the FD by default
+	const int previous = fd_.exchange(duplicate);
+	if (previous >= 0)
+		::close(previous);
 
-	LOGI("TUN file descriptor set: %d", fd_);
+	LOGI("TUN file descriptor duplicated: java=%d native=%d", fd, duplicate);
 	return true;
 }
 
@@ -60,7 +58,7 @@ bool AndroidTunAdapter::open(const std::string& dev_name)
 {
 	// No-op for Android - FD is provided by VpnService
 	// This method exists for interface compatibility
-	if (fd_ < 0)
+	if (fd_.load() < 0)
 	{
 		LOGE("open() called but no FD set. Call set_fd() first.");
 		return false;
@@ -82,15 +80,27 @@ bool AndroidTunAdapter::configure(const std::string& ip_address, const std::stri
 
 std::vector<uint8_t> AndroidTunAdapter::read()
 {
-	if (fd_ < 0)
+	const int fd = fd_.load();
+	if (fd < 0)
 	{
 		return {};
 	}
 
+	pollfd descriptor{fd, POLLIN, 0};
+	int poll_result;
+	do
+	{
+		poll_result = ::poll(&descriptor, 1, 250);
+	}
+	while (poll_result < 0 && errno == EINTR);
+
+	if (poll_result <= 0 || (descriptor.revents & POLLIN) == 0)
+		return {};
+
 	// MTU is typically 1500, but allocate extra for safety
 	std::vector<uint8_t> buffer(2048);
 
-	ssize_t nread = ::read(fd_, buffer.data(), buffer.size());
+	ssize_t nread = ::read(fd, buffer.data(), buffer.size());
 
 	if (nread < 0)
 	{
@@ -117,7 +127,8 @@ std::vector<uint8_t> AndroidTunAdapter::read()
 
 bool AndroidTunAdapter::write(const std::vector<uint8_t>& data)
 {
-	if (fd_ < 0)
+	const int fd = fd_.load();
+	if (fd < 0)
 	{
 		LOGE("write() called but FD is invalid");
 		return false;
@@ -128,7 +139,7 @@ bool AndroidTunAdapter::write(const std::vector<uint8_t>& data)
 		return true;  // Nothing to write
 	}
 
-	ssize_t nwritten = ::write(fd_, data.data(), data.size());
+	ssize_t nwritten = ::write(fd, data.data(), data.size());
 
 	if (nwritten < 0)
 	{
@@ -155,7 +166,7 @@ std::string AndroidTunAdapter::get_adapter_name() const
 
 bool AndroidTunAdapter::is_valid() const
 {
-	return fd_ >= 0;
+	return fd_.load() >= 0;
 }
 
 bool AndroidTunAdapter::set_status(bool connected)
@@ -167,11 +178,10 @@ bool AndroidTunAdapter::set_status(bool connected)
 
 void AndroidTunAdapter::close_fd()
 {
-	if (fd_ >= 0)
+	const int fd = fd_.exchange(-1);
+	if (fd >= 0)
 	{
-		::close(fd_);
-		fd_ = -1;
-		owns_fd_ = false;
+		::close(fd);
 		LOGI("TUN file descriptor closed");
 	}
 }

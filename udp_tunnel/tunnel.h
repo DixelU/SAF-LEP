@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -22,6 +23,7 @@
 
 #include "../lep/encryption.h"
 #include "../lep/low_entropy_protocol.h"
+#include "ip_routing.h"
 
 #ifdef _WIN32
 #include "windows_tap.h"
@@ -48,6 +50,13 @@ enum class encode_scheme
 {
 	lep_v0,
 	lep_v1,
+	raw,
+};
+
+enum class forwarding_mode
+{
+	hub,
+	route,
 };
 
 // packet data for long term storage
@@ -89,6 +98,16 @@ struct tunnel_stats
 	std::atomic<uint64_t> packets_lost{0};
 	std::atomic<uint64_t> retransmit_requests{0};
 
+	// Diagnostics for the "8 MB/s on the wire, ~nothing on the socket" gap.
+	// tap_bytes_in/out are measured at the TAP/TUN boundary (vpn_interface), which
+	// the UDP socket counters above never see; broadcast_drops counts packets read
+	// from the adapter that were discarded because no peer was connected.
+	std::atomic<uint64_t> tap_bytes_in{0};
+	std::atomic<uint64_t> tap_bytes_out{0};
+	std::atomic<uint64_t> broadcast_drops{0};
+	std::atomic<uint64_t> route_drops{0};
+	std::atomic<uint64_t> route_conflicts{0};
+
 	mutable std::mutex events_mutex;
 	std::deque<packet_event> recent_events;
 	static constexpr size_t MAX_EVENTS = 10;
@@ -126,6 +145,25 @@ struct tunnel_stats
 	}
 };
 
+struct checked_fragment_mask : std::vector<uint8_t>
+{
+	using std::vector<uint8_t>::vector;
+
+	uint8_t& operator[](size_t index)
+	{
+		if (index >= size()) [[unlikely]]
+			throw std::out_of_range("Fragment index exceeds reassembly mask");
+		return std::vector<uint8_t>::operator[](index);
+	}
+
+	const uint8_t& operator[](size_t index) const
+	{
+		if (index >= size()) [[unlikely]]
+			throw std::out_of_range("Fragment index exceeds reassembly mask");
+		return std::vector<uint8_t>::operator[](index);
+	}
+};
+
 struct fragment_assembly
 {
 	std::vector<uint8_t> data;
@@ -133,7 +171,7 @@ struct fragment_assembly
 	size_t total_expected_bytes = 0;
 	uint8_t total_frags = 0;
 	uint8_t received_frags_count = 0;
-	std::vector<uint8_t> received_frags_mask;
+	checked_fragment_mask received_frags_mask;
 	std::chrono::steady_clock::time_point first_frag_time;
 	std::chrono::steady_clock::time_point last_request_time;
 	uint8_t request_count = 0;
@@ -156,31 +194,55 @@ struct peer_connection
 	std::set<uint32_t> late_reassembly;
 
 	bool is_connected = false;
+	// True for explicitly configured targets (connect_to_peer). Persistent peers
+	// keep probing to reconnect and are never evicted; learned peers (discovered
+	// from inbound datagrams) are evicted once silent so a NAT rebind or stray
+	// packet cannot leave an immortal entry that re-probes forever.
+	bool persistent = false;
+};
+
+// Base interface for all tunnel implementations
+class tunnel_interface
+{
+public:
+	virtual ~tunnel_interface() = default;
+	virtual void start() = 0;
+	virtual void stop() = 0;
+	virtual void broadcast(const std::vector<uint8_t>& data) = 0;
+	virtual void send_to_peer_async(const std::vector<uint8_t>& data,
+		const boost::asio::ip::udp::endpoint& peer) = 0;
+	virtual void set_packet_received_callback(packet_received_callback cb) = 0;
+	virtual tunnel_stats& get_stats() = 0;
+	virtual const tunnel_stats& get_stats() const = 0;
+	virtual void set_encryption_key(const std::string& key) = 0;
+	virtual std::vector<boost::asio::ip::udp::endpoint> get_connected_peers() const = 0;
+	virtual size_t get_peer_count() const = 0;
 };
 
 // P2P Tunnel class - handles UDP communication with LEP encoding
-class p2p_tunnel : public std::enable_shared_from_this<p2p_tunnel>
+class p2p_tunnel : public tunnel_interface, public std::enable_shared_from_this<p2p_tunnel>
 {
 public:
 	explicit p2p_tunnel(uint16_t local_port, encode_scheme scheme);
-	~p2p_tunnel();
+	~p2p_tunnel() override;
 
 	p2p_tunnel(const p2p_tunnel&) = delete;
 	p2p_tunnel& operator=(const p2p_tunnel&) = delete;
 
 	// Start the tunnel (async operations)
-	void start();
-	void stop();
+	void start() override;
+	void stop() override;
 
 	// Run the IO context (blocking)
 	void run();
 	void run_in_thread();
 
 	// Send data to a specific peer (with LEP encoding)
-	void send_to_peer_async(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& peer);
+	void send_to_peer_async(const std::vector<uint8_t>& data,
+		const boost::asio::ip::udp::endpoint& peer) override;
 
 	// Broadcast to all connected peers
-	void broadcast(const std::vector<uint8_t>& data);
+	void broadcast(const std::vector<uint8_t>& data) override;
 
 	// Connect to a peer (for P2P establishment)
 	void connect_to_peer(const std::string& address, const std::string& port);
@@ -189,22 +251,30 @@ public:
 	// Get local endpoint
 	boost::asio::ip::udp::endpoint get_local_endpoint() const;
 
+#if defined(__ANDROID__)
+	int get_socket_fd();
+#endif
+
 	// Set callbacks
-	void set_packet_received_callback(packet_received_callback cb);
+	void set_packet_received_callback(packet_received_callback cb) override;
 	void set_connection_callback(connection_callback cb);
 
 	// Set encryption key from seed string
-	void set_encryption_key(const std::string& seed_key);
+	void set_encryption_key(const std::string& seed_key) override;
 
 	// Get connected peers
-	std::vector<boost::asio::ip::udp::endpoint> get_connected_peers() const;
+	std::vector<boost::asio::ip::udp::endpoint> get_connected_peers() const override;
+
+	// Total peer_connection entries (connected + lingering). A gap between this and
+	// the connected count reveals zombie/rebind churn.
+	size_t get_peer_count() const override;
 
 	// Check if peer is connected
 	bool is_peer_connected(const boost::asio::ip::udp::endpoint& peer) const;
 
 	// Get statistics for watchscreen
-	tunnel_stats& get_stats() { return stats_; }
-	const tunnel_stats& get_stats() const { return stats_; }
+	tunnel_stats& get_stats() override { return stats_; }
+	const tunnel_stats& get_stats() const override { return stats_; }
 
 	static constexpr uint8_t PAC_RRQ = 19; // packet re-request
 	static constexpr uint8_t PAC_LTR = 37; // packet less-than (that index was) recieved
@@ -222,9 +292,12 @@ private:
 	void handle_fragmentation(peer_connection& peer, dixelu::lep::packet& decoded);
 	void handle_control_packet(peer_connection& peer, dixelu::lep::packet& decoded);
 	void send_control_packet(peer_connection& peer, uint8_t type, const std::vector<uint8_t>& extra_data = {});
+	void send_raw_control(peer_connection& peer, std::vector<uint8_t> payload);
+	void handle_long_control_packet(peer_connection& peer, dixelu::lep::packet& decoded);
 
 	void internal_cleanup_procedure(peer_connection& peer);
 	void run_peer_maintenance(peer_connection& peer);
+	void reset_peer_session_locked(peer_connection& peer);
 	
 	// Refactoring helpers
 	void process_packet_gap(peer_connection& peer, uint32_t packet_id);
@@ -258,6 +331,7 @@ private:
 	uint32_t max_reassembly_lifetime_{45};
 	uint32_t peer_silence_timeout_{15};
 	uint32_t reconnect_probe_interval_{5};
+	uint32_t peer_eviction_timeout_{60}; // drop silent, non-persistent peers after this many seconds
 
 	static constexpr size_t MAX_FRAGMENT_SIZE = 150;
 
@@ -274,7 +348,10 @@ private:
 class vpn_interface
 {
 public:
-	explicit vpn_interface(std::shared_ptr<p2p_tunnel> tunnel);
+	explicit vpn_interface(std::shared_ptr<tunnel_interface> tunnel,
+		std::string adapter_identifier = {},
+		forwarding_mode forwarding = forwarding_mode::hub,
+		bool learn_peer_routes = false);
 	~vpn_interface();
 
 	// Start the VPN interface (desktop platforms)
@@ -290,7 +367,16 @@ public:
 	void stop();
 
 private:
-	std::shared_ptr<p2p_tunnel> tunnel_;
+	std::shared_ptr<tunnel_interface> tunnel_;
+	// Linux: requested TUN device name. Windows: requested TAP device GUID.
+	// Empty preserves the platform's legacy default selection.
+	std::string adapter_identifier_;
+	forwarding_mode forwarding_mode_;
+	bool learn_peer_routes_;
+	std::mutex routes_mutex_;
+	routing::route_bindings routes_;
+	std::unordered_map<std::string, boost::asio::ip::udp::endpoint> route_endpoints_;
+	std::optional<std::string> subnet_broadcast_key_;
 #ifdef _WIN32
 	std::unique_ptr<TapAdapter> tap_adapter_;
 	boost::asio::ip::address_v4 local_ip_;
@@ -303,7 +389,12 @@ private:
 	std::thread read_thread_;
 
 	void read_from_tap();
+	void forward_adapter_packet(const std::vector<uint8_t>& data);
+	void route_adapter_packet(const std::vector<uint8_t>& data);
+	bool learn_peer_route(const routing::ip_packet_info& packet,
+		const boost::asio::ip::udp::endpoint& from);
 	void handle_tunnel_packet(const std::vector<uint8_t>& data, const boost::asio::ip::udp::endpoint& from);
+	static std::string endpoint_key(const boost::asio::ip::udp::endpoint& endpoint);
 
 	void handle_arp(const std::vector<uint8_t>& packet);
 

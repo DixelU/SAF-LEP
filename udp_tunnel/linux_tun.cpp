@@ -19,6 +19,26 @@ namespace dixelu
 namespace udp
 {
 
+namespace
+{
+
+bool is_valid_tun_name(const std::string& name)
+{
+	if (name.empty() || name.size() >= IFNAMSIZ)
+		return false;
+
+	for (const unsigned char c : name)
+	{
+		const bool alpha_numeric = (c >= 'a' && c <= 'z') ||
+			(c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+		if (!alpha_numeric && c != '_' && c != '-' && c != '.')
+			return false;
+	}
+	return true;
+}
+
+} // namespace
+
 TunAdapter::TunAdapter() : fd_(-1) {}
 
 TunAdapter::~TunAdapter()
@@ -34,6 +54,14 @@ bool TunAdapter::open(const std::string& dev_name)
 	struct ifreq ifr;
 	int fd, err;
 
+	if (!is_valid_tun_name(dev_name))
+	{
+		std::cerr << "Invalid TUN device name '" << dev_name
+		          << "' (use 1-" << (IFNAMSIZ - 1)
+		          << " letters, digits, '.', '_' or '-')" << std::endl;
+		return false;
+	}
+
 	if ((fd = ::open("/dev/net/tun", O_RDWR)) < 0)
 	{
 		std::cerr << "Failed to open /dev/net/tun: " << strerror(errno) << std::endl;
@@ -43,10 +71,7 @@ bool TunAdapter::open(const std::string& dev_name)
 	memset(&ifr, 0, sizeof(ifr));
 	ifr.ifr_flags = IFF_TUN | IFF_NO_PI; // IFF_TUN = TUN device (no Ethernet headers), IFF_NO_PI = No packet info
 
-	if (!dev_name.empty())
-	{
-		strncpy(ifr.ifr_name, dev_name.c_str(), IFNAMSIZ);
-	}
+	strncpy(ifr.ifr_name, dev_name.c_str(), IFNAMSIZ - 1);
 
 	if ((err = ioctl(fd, TUNSETIFF, (void *)&ifr)) < 0)
 	{

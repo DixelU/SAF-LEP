@@ -1,254 +1,147 @@
-# SAF-LEP Android Port
+# SAF-LEP for Android
 
-This directory contains the native C++ code and sample Kotlin implementation for running SAF-LEP on Android.
+This is a complete Android application that can be built from the command
+line. Android Studio is not required.
 
-## Directory Structure
-
-```
-android/
-├── cpp/
-│   ├── CMakeLists.txt     # NDK build configuration
-│   └── native-lib.cpp     # JNI bridge between Java/Kotlin and C++
-├── kotlin/
-│   └── SafLepVpnService.kt  # Sample VpnService implementation
-└── README.md              # This file
-```
+The app contains a small Java launcher and `VpnService`, plus the existing
+C++23 tunnel core compiled with the Android NDK. The default APK contains both
+`arm64-v8a` (physical devices) and `x86_64` (emulators and compatible devices).
 
 ## Prerequisites
 
-### 1. Android NDK
+- JDK 17 or newer
+- Android SDK Platform 36 and Build Tools 36.0.0
+- Android NDK 27.0.12077973
+- CMake 3.22.1 and Ninja from the Android SDK
+- Boost headers 1.69 or newer, or network access for the pinned Boost 1.87.0
+  fallback
 
-Install the NDK via Android Studio SDK Manager or download from:
-https://developer.android.com/ndk/downloads
+`BOOST_ROOT` may point either to a Boost root containing `include/boost` or
+directly to the directory containing `boost/`. No Boost binaries are needed:
+Boost.Asio and the used Boost.System API are header-only.
 
-### 2. Boost for Android
+## Headless build
 
-You need to compile Boost libraries (System, Thread, Asio) for Android architectures.
+### Windows PowerShell
 
-**Recommended tool:** [Boost-for-Android](https://github.com/moritz-wundke/Boost-for-Android)
+```powershell
+cd android
+$env:JAVA_HOME = 'C:\path\to\jdk-17-or-newer'
+$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
+$env:BOOST_ROOT = 'C:\path\to\boost-or-vcpkg-triplet'
+.\gradlew.bat :app:assembleDebug --no-daemon
+```
+
+### Linux, macOS, or Termux
 
 ```bash
-# Clone the builder
-git clone https://github.com/moritz-wundke/Boost-for-Android.git
-cd Boost-for-Android
-
-# Build for Android (adjust NDK path)
-./build-android.sh $NDK_ROOT --boost=1.83.0 --arch=arm64-v8a,armeabi-v7a,x86_64 \
-    --with-libraries=system,thread
+cd android
+export JAVA_HOME=/path/to/jdk-17-or-newer
+export ANDROID_HOME=/path/to/android-sdk
+export BOOST_ROOT=/path/to/boost-or-system-prefix
+./gradlew :app:assembleDebug --no-daemon
 ```
 
-**Expected output structure:**
-```
-boost/
-├── include/
-│   └── boost/
-│       ├── asio/
-│       ├── system/
-│       └── ...
-└── lib/
-    ├── arm64-v8a/
-    │   ├── libboost_system.a
-    │   └── libboost_thread.a
-    ├── armeabi-v7a/
-    │   └── ...
-    └── x86_64/
-        └── ...
+The first online build downloads the pinned Gradle distribution, Android
+Gradle Plugin, AAPT2, and (only when `BOOST_ROOT` is absent) Boost headers.
+Every version used by the project is pinned.
+
+Output:
+
+```text
+app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## Integration Steps
+Install it on a connected device with:
 
-### Step 1: Create Android Studio Project
-
-1. Create a new **"Native C++"** project in Android Studio
-2. Select C++ Standard: **C++17** or higher (the project uses C++23 features but can be adjusted)
-
-### Step 2: Copy Source Files
-
-Copy the following files to your project:
-
-```
-your-project/
-└── app/
-    └── src/
-        └── main/
-            ├── cpp/
-            │   ├── CMakeLists.txt          # From android/cpp/
-            │   ├── native-lib.cpp          # From android/cpp/
-            │   ├── udp_tunnel/             # From root udp_tunnel/
-            │   │   ├── tunnel.h
-            │   │   ├── tunnel.cpp
-            │   │   ├── android_tun.h
-            │   │   ├── android_tun.cpp
-            │   │   └── global_flags.h
-            │   └── lep/                    # From root lep/
-            │       ├── encryption.h
-            │       └── low_entropy_protocol.h
-            └── kotlin/
-                └── com/example/saflep/
-                    └── SafLepVpnService.kt  # From android/kotlin/
+```powershell
+.\gradlew.bat :app:installDebug --no-daemon
 ```
 
-### Step 3: Configure build.gradle
+The initial `VpnService` consent dialog is an Android security requirement and
+must be accepted on the device; compilation and installation remain headless.
 
-In `app/build.gradle`:
+## Offline builds
 
-```groovy
-android {
-    defaultConfig {
-        // ...
-        externalNativeBuild {
-            cmake {
-                cppFlags "-std=c++23"
-                arguments "-DBOOST_ROOT=/path/to/your/boost"
-            }
-        }
-        ndk {
-            abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
-        }
-    }
+After Gradle and AGP are cached, the project can build offline. If AGP's AAPT2
+artifact is not cached, point it at Build Tools 36.0.0 from the installed SDK.
+For example in PowerShell:
 
-    externalNativeBuild {
-        cmake {
-            path "src/main/cpp/CMakeLists.txt"
-            version "3.22.1"
-        }
-    }
-}
+```powershell
+$aapt2 = "$env:ANDROID_HOME/build-tools/36.0.0/aapt2.exe"
+$env:GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=$aapt2"
+.\gradlew.bat :app:assembleDebug --no-daemon --offline
 ```
 
-### Step 4: Update AndroidManifest.xml
+For a faster single-ABI build:
 
-Add the VPN service declaration:
-
-```xml
-<manifest>
-    <application>
-        <!-- ... -->
-
-        <service
-            android:name=".SafLepVpnService"
-            android:permission="android.permission.BIND_VPN_SERVICE"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.net.VpnService" />
-            </intent-filter>
-        </service>
-    </application>
-</manifest>
+```powershell
+$env:ORG_GRADLE_PROJECT_safLepAbis = 'arm64-v8a'
+.\gradlew.bat :app:assembleDebug --no-daemon
 ```
 
-### Step 5: Request VPN Permission
+Use `-PsafLepAbis=arm64-v8a` in POSIX shells. If `BOOST_ROOT` is not supplied,
+the Boost fallback needs one successful online configure before offline builds.
 
-Before starting the VPN, request user permission:
+## Source layout
 
-```kotlin
-// In your Activity
-private fun startVpn() {
-    val intent = VpnService.prepare(this)
-    if (intent != null) {
-        // User hasn't granted VPN permission yet
-        startActivityForResult(intent, VPN_REQUEST_CODE)
-    } else {
-        // Permission granted, start the service
-        startVpnService()
-    }
-}
-
-override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-    super.onActivityResult(requestCode, resultCode, data)
-    if (requestCode == VPN_REQUEST_CODE && resultCode == RESULT_OK) {
-        startVpnService()
-    }
-}
-
-private fun startVpnService() {
-    val intent = Intent(this, SafLepVpnService::class.java).apply {
-        putExtra("server_ip", "your.server.ip")
-        putExtra("server_port", 14578)
-        putExtra("seed_key", "your-encryption-key")
-        putExtra("vpn_address", "10.0.0.2")
-        putExtra("vpn_prefix", 24)
-    }
-    startService(intent)
-}
+```text
+android/
+|-- app/src/main/
+|   |-- AndroidManifest.xml
+|   `-- java/com/example/saflep/
+|       |-- MainActivity.java
+|       `-- SafLepVpnService.java
+|-- cpp/
+|   |-- CMakeLists.txt
+|   `-- native-lib.cpp
+|-- gradle/wrapper/
+|-- build.gradle
+|-- settings.gradle
+`-- gradlew / gradlew.bat
 ```
 
-## Architecture Notes
+The launcher offers LEP v0, LEP v1, and raw framing. LEP v0 remains the default
+for compatibility with existing workflows; the client and server must select
+the same scheme. Raw framing adds only a four-byte packet index and the launcher
+requires a non-empty seed key for it. The native bridge protects the UDP socket
+from VPN routing, and the TUN adapter owns a duplicated file descriptor so
+shutdown cannot invalidate the descriptor managed by Java.
 
-### Routing Loop Prevention
+## Launcher settings and status
 
-Android's VpnService routes **all** traffic through the TUN interface, including the encrypted UDP packets destined for the VPN server. This creates an infinite loop.
+The launcher persists the server, port, LEP version, VPN addressing, and
+logging settings in the app's private preferences. The seed key can be shown
+while editing and can be remembered or removed independently. Android backup is
+disabled for this app, but a remembered key is still stored locally on the
+device rather than in a hardware-backed secret store.
 
-**Solution:** The native code calls back to `VpnService.protect(socket)` to exclude the tunnel's UDP socket from VPN routing. This is handled automatically in `native-lib.cpp`.
+The VPN address controls correspond to the desktop `--ip`, `--mask`, and
+`--gw` values. Android's `VpnService` does not expose a next-hop gateway for a
+TUN route, so the gateway field controls routing mode: a non-empty value
+captures all IPv4 traffic, while an empty value captures only the configured
+VPN subnet.
 
-### Background Execution
+The activity status panel survives activity recreation and reports each setup
+stage, the resolved server IP, local UDP port, peer traffic, UDP and TUN byte
+counters, and packets discarded before a peer was available. The notification
+and activity both provide a **Disconnect** action.
 
-Android aggressively kills background processes. To keep the VPN running:
+Server hostnames are resolved before the catch-all VPN route is installed, and
+the native bridge receives the resulting numeric IPv4 endpoint. This prevents
+the initial DNS lookup from being routed into a tunnel that is not ready yet.
 
-1. The service runs as a **Foreground Service** with a notification
-2. Consider implementing a **WakeLock** for CPU-intensive operations
-3. Handle `onRevoke()` gracefully when the user revokes VPN permission
+If the panel says **Peer traffic: none yet**, the local TUN and UDP socket are
+running but no datagram has returned from the server. Check that the server is
+listening on UDP, its firewall/NAT exposes the selected port, and both sides use
+the same LEP version and seed key. Rising `TUN->peer` and UDP TX counters with
+zero UDP RX narrow the problem to the server/network path rather than Android's
+VPN interface.
 
-### APK Size
+## Logging
 
-Boost libraries can significantly increase APK size. To minimize:
-
-1. Use `bcp` (Boost Copy) to extract only needed headers
-2. Enable ProGuard/R8 for release builds
-3. Use Android App Bundles to deliver architecture-specific libraries
-
-## Troubleshooting
-
-### Build Errors
-
-**"Boost not found"**: Set the `BOOST_ROOT` environment variable or edit the path in `CMakeLists.txt`
-
-**"Cannot find -lboost_system"**: Ensure Boost libraries are compiled for the correct Android ABI
-
-### Runtime Errors
-
-**"Failed to establish VPN interface"**: User may have denied VPN permission. Check `VpnService.prepare()` result.
-
-**"VPN disconnects immediately"**: Check logcat for native errors. Common causes:
-- Invalid server IP/port
-- Network permission issues
-- Socket protection failure
-
-### Logging
-
-Enable verbose mode for detailed logging:
-
-```kotlin
-intent.putExtra("verbose", true)
-```
-
-Then check logcat:
-```bash
-adb logcat -s SAF-LEP-JNI SAF-LEP-TUN
-```
-
-## Building Standalone (Without Android Studio)
-
-For CI/CD or command-line builds:
+Enable **Verbose logging** in the launcher, then inspect:
 
 ```bash
-# Set environment
-export NDK_ROOT=/path/to/android-ndk
-export BOOST_ROOT=/path/to/boost
-
-# Configure
-cd android/cpp
-mkdir build && cd build
-cmake -DCMAKE_TOOLCHAIN_FILE=$NDK_ROOT/build/cmake/android.toolchain.cmake \
-      -DANDROID_ABI=arm64-v8a \
-      -DANDROID_NATIVE_API_LEVEL=24 \
-      -DBOOST_ROOT=$BOOST_ROOT \
-      ..
-
-# Build
-make -j$(nproc)
+adb logcat -s SAF-LEP-JNI SAF-LEP-TUN SafLepVpnService
 ```
-
-## License
-
-Same as the parent SAF-LEP project.
