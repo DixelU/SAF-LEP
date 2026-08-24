@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <limits>
 #include <numeric>
+#include <random>
 #include <ranges>
 
 #include "global_flags.h"
@@ -15,6 +16,53 @@ namespace dixelu
 {
 namespace udp
 {
+
+namespace
+{
+
+reconnect::nonce make_reconnect_nonce()
+{
+	reconnect::nonce result{};
+	std::random_device source;
+	for (auto& byte : result)
+		byte = static_cast<uint8_t>(source());
+
+	// Keep the all-zero value unavailable as a sentinel/debugging accident even
+	// on an implementation with a broken random_device.
+	if (std::ranges::all_of(result, [](uint8_t byte) { return byte == 0; }))
+		result.back() = 1;
+	return result;
+}
+
+bool is_structurally_valid_session_packet(const std::vector<uint8_t>& data)
+{
+	if (data.empty())
+		return false;
+
+	if (data.size() < 6)
+	{
+		switch (data[0])
+		{
+			case p2p_tunnel::PAC_IWA:
+				return data.size() == 1;
+			case p2p_tunnel::PAC_RRQ:
+			case p2p_tunnel::PAC_LTR:
+			case p2p_tunnel::PAC_LST:
+				return data.size() == 5;
+			default:
+				return false;
+		}
+	}
+
+	// Long-form RRQ: [packet id:4][type][zero marker][missing fragments...].
+	if (data[5] == 0)
+		return data[4] == p2p_tunnel::PAC_RRQ && data.size() >= 7;
+
+	// Ordinary fragment: [packet id:4][fragment][fragment count][payload...].
+	return data.size() > 6 && data[4] < data[5];
+}
+
+} // namespace
 
 std::string p2p_tunnel::endpoint_to_string(const boost::asio::ip::udp::endpoint& ep)
 {
@@ -136,9 +184,6 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 		return;
 	}
 
-	// Update peer activity
-	update_peer_activity(remote_endpoint_);
-
 	// Track stats
 	stats_.bytes_received += bytes_transferred;
 
@@ -178,19 +223,47 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 		// Decrypt after LEP decoding (using packet index from LEP header)
 		lep::crypto::transform(encryption_key_, decoded.index, decoded.data);
 
-		// Check if this is a new connection
 		auto& peer = get_or_create_peer(remote_endpoint_);
+
+		// Reconnect controls deliberately do not count as ordinary activity. A
+		// request must complete its challenge-response before it can refresh or
+		// replace an active session.
+		if (reconnect::has_reconnect_prefix(decoded.data))
 		{
-			std::lock_guard<std::mutex> lock(peer.mutex);
-			if (!peer.is_connected)
-			{
-				peer.is_connected = true;
-				if (connection_callback_)
-				{
-					connection_callback_(remote_endpoint_);
-				}
-			}
+			if (auto message = reconnect::decode(decoded.data))
+				handle_reconnect_control(peer, *message);
+			else
+				stats_.add_log("[Tunnel] Ignored malformed reconnect control from " +
+					endpoint_to_string(remote_endpoint_));
+			start_receive();
+			return;
 		}
+
+		// Preserve old-client interoperability without allowing a bare zero to
+		// reset or keep alive an active connection.
+		if (reconnect::is_legacy_handshake(decoded.data))
+		{
+			const bool connected = handle_legacy_handshake(peer);
+			if (connected && connection_callback_)
+				connection_callback_(remote_endpoint_);
+			start_receive();
+			return;
+		}
+
+		if (!is_structurally_valid_session_packet(decoded.data))
+		{
+			stats_.add_log("[Tunnel] Ignored malformed packet from " +
+				endpoint_to_string(remote_endpoint_));
+			start_receive();
+			return;
+		}
+
+		// Only a successfully decoded, non-handshake packet is ordinary peer
+		// activity. This prevents arbitrary UDP noise and reconnect requests from
+		// indefinitely postponing the silence timeout.
+		const bool connected = update_peer_activity(peer);
+		if (connected && connection_callback_)
+			connection_callback_(remote_endpoint_);
 
 		// Call packet callback
 		if (!decoded.data.empty())
@@ -655,6 +728,139 @@ void p2p_tunnel::send_raw_control(peer_connection& peer, std::vector<uint8_t> pa
 	}
 }
 
+void p2p_tunnel::send_reconnect_request_locked(peer_connection& peer,
+	std::chrono::steady_clock::time_point now)
+{
+	// Called with peer.mutex held. Reuse the request nonce across retries so a
+	// delayed challenge can still be matched and an accepted response can be
+	// replayed without resetting the peer twice.
+	auto request = peer.reconnect_state.outbound_nonce();
+	if (!request)
+	{
+		request = make_reconnect_nonce();
+		peer.reconnect_state.begin_outbound(*request, now);
+	}
+
+	reconnect::message message;
+	message.type = reconnect::message_type::request;
+	message.request_nonce = *request;
+	send_raw_control(peer, reconnect::encode(message));
+}
+
+void p2p_tunnel::handle_reconnect_control(peer_connection& peer,
+	const reconnect::message& message)
+{
+	const auto now = std::chrono::steady_clock::now();
+	bool connected = false;
+
+	{
+		std::lock_guard<std::mutex> lock(peer.mutex);
+
+		switch (message.type)
+		{
+			case reconnect::message_type::request:
+			{
+				const auto request = peer.reconnect_state.receive_request(
+					message.request_nonce, make_reconnect_nonce(), now,
+					reconnect_challenge_lifetime_, reconnect_accepted_lifetime_);
+
+				if (request.action == reconnect::request_action::reject)
+					break;
+
+				reconnect::message response;
+				response.request_nonce = message.request_nonce;
+				if (request.action == reconnect::request_action::resend_accepted)
+				{
+					response.type = reconnect::message_type::accepted;
+				}
+				else
+				{
+					response.type = reconnect::message_type::challenge;
+					response.challenge_nonce = request.challenge_nonce;
+				}
+				send_raw_control(peer, reconnect::encode(response));
+				break;
+			}
+
+			case reconnect::message_type::challenge:
+			{
+				// A spoofed reset request makes the real peer receive an unsolicited
+				// challenge. Never echo it unless its request nonce was generated here.
+				if (!peer.reconnect_state.expects_challenge(message.request_nonce))
+					break;
+
+				reconnect::message response;
+				response.type = reconnect::message_type::confirm;
+				response.request_nonce = message.request_nonce;
+				response.challenge_nonce = message.challenge_nonce;
+				send_raw_control(peer, reconnect::encode(response));
+				break;
+			}
+
+			case reconnect::message_type::confirm:
+			{
+				if (!peer.reconnect_state.confirm_inbound(message.request_nonce,
+					message.challenge_nonce, now, reconnect_challenge_lifetime_))
+					break;
+
+				const bool was_connected = peer.is_connected;
+				reset_peer_session_locked(peer);
+				peer.reconnect_state.remember_accepted(message.request_nonce, now);
+				peer.is_connected = true;
+				peer.last_seen = now;
+				peer.last_probe_time = std::chrono::steady_clock::time_point{};
+
+				reconnect::message response;
+				response.type = reconnect::message_type::accepted;
+				response.request_nonce = message.request_nonce;
+				send_raw_control(peer, reconnect::encode(response));
+
+				stats_.add_log("[Tunnel] Peer session reset after verified reconnect: " +
+					endpoint_to_string(peer.endpoint));
+				connected = !was_connected;
+				break;
+			}
+
+			case reconnect::message_type::accepted:
+			{
+				if (!peer.reconnect_state.accept_outbound(message.request_nonce))
+					break;
+
+				const bool was_connected = peer.is_connected;
+				peer.is_connected = true;
+				peer.last_seen = now;
+				peer.last_probe_time = std::chrono::steady_clock::time_point{};
+				stats_.add_log("[Tunnel] Reconnect accepted by peer: " +
+					endpoint_to_string(peer.endpoint));
+				connected = !was_connected;
+				break;
+			}
+		}
+	}
+
+	if (connected && connection_callback_)
+		connection_callback_(peer.endpoint);
+}
+
+bool p2p_tunnel::handle_legacy_handshake(peer_connection& peer)
+{
+	std::lock_guard<std::mutex> lock(peer.mutex);
+	if (!reconnect::legacy_handshake_may_establish(peer.is_connected))
+	{
+		// Crucially, do not refresh last_seen. Repeated legacy probes must not
+		// prevent the active stale session from reaching its silence timeout.
+		return false;
+	}
+
+	reset_peer_session_locked(peer);
+	peer.is_connected = true;
+	peer.last_seen = std::chrono::steady_clock::now();
+	peer.last_probe_time = std::chrono::steady_clock::time_point{};
+	stats_.add_log("[Tunnel] Legacy handshake established inactive peer: " +
+		endpoint_to_string(peer.endpoint));
+	return true;
+}
+
 void p2p_tunnel::reset_peer_session_locked(peer_connection& peer)
 {
 	for (const auto& [packet_id, assembly] : peer.reassembly_buffer)
@@ -864,7 +1070,18 @@ void p2p_tunnel::run_peer_maintenance(peer_connection& peer)
 			stats_.add_log("[Tunnel] Peer timed out: " + endpoint_to_string(peer.endpoint));
 		}
 
-		if (!peer.is_connected)
+		// A peer that has sent valid ordinary traffic but does not understand the
+		// challenge protocol is an older binary. Stop negotiation after a bounded
+		// compatibility window; disconnected peers continue retrying indefinitely.
+		if (peer.is_connected && peer.reconnect_state.outbound_expired(
+			now, reconnect_legacy_fallback_))
+		{
+			peer.reconnect_state.clear_outbound();
+			stats_.add_log("[Tunnel] Reconnect negotiation fell back to legacy peer: " +
+				endpoint_to_string(peer.endpoint));
+		}
+
+		if (!peer.is_connected || peer.reconnect_state.has_outbound())
 		{
 			auto since_probe = peer.last_probe_time == std::chrono::steady_clock::time_point{}
 				? reconnect_probe_interval_
@@ -880,8 +1097,14 @@ void p2p_tunnel::run_peer_maintenance(peer_connection& peer)
 
 	if (should_probe)
 	{
+		// The zero probe remains for older binaries, but a new peer only resets an
+		// active session after the challenge-response request below is confirmed.
 		std::vector<uint8_t> connection_packet = {0x00};
 		send_to_peer_async(connection_packet, peer.endpoint);
+		{
+			std::lock_guard<std::mutex> lock(peer.mutex);
+			send_reconnect_request_locked(peer, now);
+		}
 		return;
 	}
 
@@ -1038,18 +1261,25 @@ void p2p_tunnel::connect_to_peer(const boost::asio::ip::udp::endpoint& endpoint)
 {
 	// Create peer entry
 	auto& peer = get_or_create_peer(endpoint);
+	const auto now = std::chrono::steady_clock::now();
 	{
 		std::lock_guard<std::mutex> locker(peer.mutex);
 		reset_peer_session_locked(peer);
+		peer.reconnect_state.clear();
 		peer.persistent = true;
 		peer.is_connected = true;
-		peer.last_seen = std::chrono::steady_clock::now();
-		peer.last_probe_time = std::chrono::steady_clock::now();
+		peer.last_seen = now;
+		peer.last_probe_time = now;
 	}
 
-	// Send a connection packet (empty data to establish connection)
+	// Keep the legacy probe for old binaries, then start a non-disruptive
+	// challenge-response reconnect for peers that understand it.
 	std::vector<uint8_t> connection_packet = {0x00}; // Connection handshake
 	send_to_peer_async(connection_packet, endpoint);
+	{
+		std::lock_guard<std::mutex> locker(peer.mutex);
+		send_reconnect_request_locked(peer, now);
+	}
 
 	if (connection_callback_)
 	{
@@ -1147,9 +1377,8 @@ peer_connection& p2p_tunnel::get_or_create_peer(const boost::asio::ip::udp::endp
 	return *(it->second);
 }
 
-void p2p_tunnel::update_peer_activity(const boost::asio::ip::udp::endpoint& endpoint)
+bool p2p_tunnel::update_peer_activity(peer_connection& peer)
 {
-	auto& peer = get_or_create_peer(endpoint);
 	std::lock_guard<std::mutex> lock(peer.mutex);
 	peer.last_seen = std::chrono::steady_clock::now();
 	if (!peer.is_connected)
@@ -1157,8 +1386,11 @@ void p2p_tunnel::update_peer_activity(const boost::asio::ip::udp::endpoint& endp
 		reset_peer_session_locked(peer);
 		peer.is_connected = true;
 		peer.last_probe_time = std::chrono::steady_clock::time_point{};
-		stats_.add_log("[Tunnel] Peer session reset: " + endpoint_to_string(endpoint));
+		stats_.add_log("[Tunnel] Peer session reset after valid traffic: " +
+			endpoint_to_string(peer.endpoint));
+		return true;
 	}
+	return false;
 }
 
 // VPN Interface Implementation

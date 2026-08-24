@@ -1,4 +1,5 @@
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <random>
@@ -8,6 +9,7 @@
 #include "../lep/encryption.h"
 #include "../lep/low_entropy_protocol.h"
 #include "../udp_tunnel/ip_routing.h"
+#include "../udp_tunnel/reconnect_handshake.h"
 
 namespace
 {
@@ -120,6 +122,97 @@ int main()
 		ok &= expect(octet >= 2 && octet <= 254,
 			"automatic client host octet should exclude network, server, and broadcast values");
 	}
+
+	using namespace dixelu::udp::reconnect;
+	nonce request_nonce{};
+	nonce challenge_nonce{};
+	nonce other_nonce{};
+	for (size_t i = 0; i < NONCE_SIZE; ++i)
+	{
+		request_nonce[i] = static_cast<uint8_t>(i + 1);
+		challenge_nonce[i] = static_cast<uint8_t>(0x80 + i);
+		other_nonce[i] = static_cast<uint8_t>(0x40 + i);
+	}
+
+	message reconnect_request;
+	reconnect_request.type = message_type::request;
+	reconnect_request.request_nonce = request_nonce;
+	auto reconnect_wire = encode(reconnect_request);
+	auto parsed_reconnect = decode(reconnect_wire);
+	ok &= expect(parsed_reconnect && parsed_reconnect->type == message_type::request &&
+		parsed_reconnect->request_nonce == request_nonce,
+		"reconnect request should survive control framing");
+
+	message reconnect_confirm;
+	reconnect_confirm.type = message_type::confirm;
+	reconnect_confirm.request_nonce = request_nonce;
+	reconnect_confirm.challenge_nonce = challenge_nonce;
+	reconnect_wire = encode(reconnect_confirm);
+	parsed_reconnect = decode(reconnect_wire);
+	ok &= expect(parsed_reconnect && parsed_reconnect->type == message_type::confirm &&
+		parsed_reconnect->request_nonce == request_nonce &&
+		parsed_reconnect->challenge_nonce == challenge_nonce,
+		"reconnect confirmation should bind both nonces");
+
+	reconnect_wire.pop_back();
+	ok &= expect(has_reconnect_prefix(reconnect_wire) && !decode(reconnect_wire),
+		"malformed reconnect controls should stay reserved but fail parsing");
+	ok &= expect(is_legacy_handshake({0}),
+		"single zero should retain legacy handshake recognition");
+	ok &= expect(is_legacy_handshake({0, 0, 0, 7, 0, 1, 0}),
+		"framed zero payload should retain legacy handshake recognition");
+	ok &= expect(!legacy_handshake_may_establish(true),
+		"legacy zero must not reset or refresh an active peer");
+	ok &= expect(legacy_handshake_may_establish(false),
+		"legacy zero may recover a peer that has already timed out");
+
+	const auto now = state::clock::time_point{};
+	constexpr auto challenge_lifetime = std::chrono::seconds(10);
+	constexpr auto accepted_lifetime = std::chrono::seconds(30);
+	state responder;
+	auto request_result = responder.receive_request(request_nonce, challenge_nonce,
+		now, challenge_lifetime, accepted_lifetime);
+	ok &= expect(request_result.action == request_action::issue_challenge &&
+		request_result.challenge_nonce == challenge_nonce,
+		"reset request should only issue a challenge");
+	request_result = responder.receive_request(request_nonce, other_nonce,
+		now + std::chrono::seconds(1), challenge_lifetime, accepted_lifetime);
+	ok &= expect(request_result.action == request_action::resend_challenge &&
+		request_result.challenge_nonce == challenge_nonce,
+		"repeated request should reuse its challenge");
+	request_result = responder.receive_request(other_nonce, other_nonce,
+		now + std::chrono::seconds(1), challenge_lifetime, accepted_lifetime);
+	ok &= expect(request_result.action == request_action::reject,
+		"a second request must not replace an unexpired challenge");
+	ok &= expect(!responder.confirm_inbound(request_nonce, other_nonce,
+		now + std::chrono::seconds(2), challenge_lifetime),
+		"wrong challenge response must not authorize a reset");
+	ok &= expect(responder.confirm_inbound(request_nonce, challenge_nonce,
+		now + std::chrono::seconds(2), challenge_lifetime),
+		"matching challenge response should authorize one reset");
+	responder.remember_accepted(request_nonce, now + std::chrono::seconds(2));
+	request_result = responder.receive_request(request_nonce, other_nonce,
+		now + std::chrono::seconds(3), challenge_lifetime, accepted_lifetime);
+	ok &= expect(request_result.action == request_action::resend_accepted,
+		"retry after a lost acceptance must not reset the session twice");
+
+	state requester;
+	ok &= expect(!requester.expects_challenge(request_nonce),
+		"unsolicited challenge must not be answered");
+	requester.begin_outbound(request_nonce, now);
+	ok &= expect(!requester.expects_challenge(other_nonce) &&
+		requester.expects_challenge(request_nonce),
+		"only the locally generated request nonce should accept a challenge");
+	ok &= expect(!requester.accept_outbound(other_nonce) &&
+		requester.accept_outbound(request_nonce),
+		"acceptance must match and consume the outbound request");
+
+	state expired;
+	expired.receive_request(request_nonce, challenge_nonce, now,
+		challenge_lifetime, accepted_lifetime);
+	ok &= expect(!expired.confirm_inbound(request_nonce, challenge_nonce,
+		now + challenge_lifetime, challenge_lifetime),
+		"expired challenge must not authorize a delayed replay reset");
 
 	if (!ok)
 		return 1;

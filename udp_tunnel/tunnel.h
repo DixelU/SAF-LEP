@@ -23,6 +23,7 @@
 
 #include "../lep/encryption.h"
 #include "../lep/low_entropy_protocol.h"
+#include "reconnect_handshake.h"
 #include "ip_routing.h"
 
 #ifdef _WIN32
@@ -199,6 +200,11 @@ struct peer_connection
 	// from inbound datagrams) are evicted once silent so a NAT rebind or stray
 	// packet cannot leave an immortal entry that re-probes forever.
 	bool persistent = false;
+
+	// A reconnect request cannot reset this peer by itself. The peer keeps one
+	// bounded challenge and requires the requester to return it before session
+	// state is discarded.
+	reconnect::state reconnect_state;
 };
 
 // Base interface for all tunnel implementations
@@ -294,6 +300,10 @@ private:
 	void send_control_packet(peer_connection& peer, uint8_t type, const std::vector<uint8_t>& extra_data = {});
 	void send_raw_control(peer_connection& peer, std::vector<uint8_t> payload);
 	void handle_long_control_packet(peer_connection& peer, dixelu::lep::packet& decoded);
+	void handle_reconnect_control(peer_connection& peer, const reconnect::message& message);
+	void send_reconnect_request_locked(peer_connection& peer,
+		std::chrono::steady_clock::time_point now);
+	bool handle_legacy_handshake(peer_connection& peer);
 
 	void internal_cleanup_procedure(peer_connection& peer);
 	void run_peer_maintenance(peer_connection& peer);
@@ -304,7 +314,7 @@ private:
 	void send_fragments(peer_connection& peer_conn, uint32_t packet_id, const std::vector<uint8_t>& data);
 	
 	peer_connection& get_or_create_peer(const boost::asio::ip::udp::endpoint& endpoint);
-	void update_peer_activity(const boost::asio::ip::udp::endpoint& endpoint);
+	bool update_peer_activity(peer_connection& peer);
 
 	const encode_scheme scheme_;
 
@@ -332,6 +342,9 @@ private:
 	uint32_t peer_silence_timeout_{15};
 	uint32_t reconnect_probe_interval_{5};
 	uint32_t peer_eviction_timeout_{60}; // drop silent, non-persistent peers after this many seconds
+	std::chrono::seconds reconnect_challenge_lifetime_{10};
+	std::chrono::seconds reconnect_accepted_lifetime_{30};
+	std::chrono::seconds reconnect_legacy_fallback_{30};
 
 	static constexpr size_t MAX_FRAGMENT_SIZE = 150;
 
