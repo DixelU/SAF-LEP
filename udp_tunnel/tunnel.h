@@ -342,6 +342,10 @@ private:
 	uint32_t peer_silence_timeout_{15};
 	uint32_t reconnect_probe_interval_{5};
 	uint32_t peer_eviction_timeout_{60}; // drop silent, non-persistent peers after this many seconds
+	// Completed reassemblies are kept this long after their last request before
+	// being acknowledged (LTR) and erased, so in-flight retransmissions of an
+	// already-complete packet do not recreate its buffer.
+	std::chrono::seconds completed_reassembly_linger_{20};
 	std::chrono::seconds reconnect_challenge_lifetime_{10};
 	std::chrono::seconds reconnect_accepted_lifetime_{30};
 	std::chrono::seconds reconnect_legacy_fallback_{30};

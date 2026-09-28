@@ -9,3 +9,4 @@ local.properties
 SAF-LEP-ExPuN/*
 x64/*
 x86/*
+*.vcxproj.user

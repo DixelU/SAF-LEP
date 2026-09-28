@@ -18,13 +18,9 @@ endif()
 
 find_package(Boost REQUIRED COMPONENTS system)
 
-# Integrate maxcalls library from SAF-AVTTS
-add_subdirectory("../SAF-AVTTS" "${CMAKE_CURRENT_BINARY_DIR}/maxcalls_build" EXCLUDE_FROM_ALL)
-
 set(SOURCES
 	test.cpp
 	udp_tunnel/tunnel.cpp
-	udp_tunnel/maxcalls_tunnel.cpp
 	udp_tunnel/auto_setup.cpp
 )
 
@@ -38,17 +34,14 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_include_directories(${PROJECT_NAME} PRIVATE 
 	${Boost_INCLUDE_DIRS}
-	"../SAF-AVTTS/include"
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
-	stdc++exp
 	Boost::system
-	maxcalls
 )
 
 if(WIN32)
-	target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32 iphlpapi bcrypt)
+	target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32 iphlpapi)
 else()
 	target_link_libraries(${PROJECT_NAME} PRIVATE pthread)
 endif()

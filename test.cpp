@@ -6,8 +6,11 @@
 #include <iomanip>
 #include <sstream>
 #include <atomic>
+#include <charconv>
 #include <cstdlib>
+#include <optional>
 #include <random>
+#include <string_view>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -23,7 +26,6 @@
 #include "lep/low_entropy_protocol.h"
 
 #include "udp_tunnel/tunnel.h"
-#include "udp_tunnel/maxcalls_tunnel.h"
 #include "udp_tunnel/global_flags.h"
 #include "udp_tunnel/auto_setup.h"
 
@@ -47,6 +49,17 @@ bool is_valid_tun_name(const std::string& name)
 }
 #endif
 
+// Accepts a full decimal string in 0-65535; anything else is rejected rather
+// than truncated or thrown out of std::stoi.
+std::optional<uint16_t> parse_port(std::string_view text)
+{
+	unsigned int value = 0;
+	const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+	if (ec != std::errc{} || end != text.data() + text.size() || text.empty() || value > 65535)
+		return std::nullopt;
+	return static_cast<uint16_t>(value);
+}
+
 void print_usage(const char* program_name)
 {
 	std::cout << "Usage: " << program_name << " [OPTIONS]" << std::endl;
@@ -54,12 +67,6 @@ void print_usage(const char* program_name)
 	std::cout << "\nQuick start (auto-setup):" << std::endl;
 	std::cout << "  " << program_name << " -s -p PORT -k KEY          # Server (Linux)" << std::endl;
 	std::cout << "  " << program_name << " -c HOST:PORT -k KEY        # Client" << std::endl;
-
-	std::cout << "\nmaxcalls mode (MAX messenger call tunnel):" << std::endl;
-	std::cout << "  " << program_name << " --max-qr-bootstrap         # One-time QR bootstrap (recommended)" << std::endl;
-	std::cout << "  " << program_name << " --max-bootstrap PHONE      # SMS bootstrap, with automatic QR fallback" << std::endl;
-	std::cout << "  " << program_name << " --max-wait --raw -k KEY       # Wait with low-overhead framing" << std::endl;
-	std::cout << "  " << program_name << " --max-call PEER --raw -k KEY  # Call with low-overhead framing" << std::endl;
 
 	std::cout << "\nManual mode (legacy):" << std::endl;
 	std::cout << "  " << program_name << " --ip IP -p PORT            # Manual IP config" << std::endl;
@@ -79,15 +86,10 @@ void print_usage(const char* program_name)
 	std::cout << "      --gw GATEWAY              VPN Gateway (legacy manual mode)" << std::endl;
 	std::cout << "      --forwarding MODE         hub (compatible default) or route (per-peer IP routing)" << std::endl;
 #ifdef _WIN32
-	std::cout << "      --tap-guid GUID            Use a specific TAP-Windows adapter (default: first TAP)" << std::endl;
+	std::cout << "      --tap-guid GUID           Use a specific TAP-Windows adapter (default: first TAP)" << std::endl;
 #else
-	std::cout << "      --tun-name NAME            Use a specific TUN device (default: tun0)" << std::endl;
+	std::cout << "      --tun-name NAME           Use a specific TUN device (default: tun0)" << std::endl;
 #endif
-	std::cout << "      --max-qr-bootstrap        One-time QR bootstrap via the official MAX app" << std::endl;
-	std::cout << "      --max-bootstrap PHONE     SMS bootstrap (e.g. +79991234567); falls back to QR if CAPTCHA is required" << std::endl;
-	std::cout << "      --max-token TOKEN         MAX login token" << std::endl;
-	std::cout << "      --max-call PEER_ID        MAX peer ID to call" << std::endl;
-	std::cout << "      --max-wait                Wait for incoming MAX call" << std::endl;
 	std::cout << "  -h, --help                    Show this help message" << std::endl;
 }
 
@@ -321,12 +323,14 @@ int main(int argc, char* argv[])
 	encode_scheme encoder = encode_scheme::lep_v0;
 	forwarding_mode forwarding = forwarding_mode::hub;
 
-	bool maxcalls_mode = false;
-	std::string max_phone;
-	bool max_qr_bootstrap = false;
-	std::string max_token;
-	std::string max_call_peer;
-	bool max_wait = false;
+	// Every value-taking option fails the same way when its value is missing,
+	// instead of silently keeping the default.
+	auto next_value = [argc, argv](int& i, const std::string& option, const char* what) -> const char* {
+		if (i + 1 < argc)
+			return argv[++i];
+		std::cerr << "Error: " << option << " requires " << what << std::endl;
+		return nullptr;
+	};
 
 	// Parse command line arguments
 	for (int i = 1; i < argc; ++i)
@@ -343,11 +347,21 @@ int main(int argc, char* argv[])
 		}
 		else if (arg == "-p" || arg == "--port")
 		{
-			if (i + 1 < argc) local_port = static_cast<uint16_t>(std::stoi(argv[++i]));
+			const char* value = next_value(i, arg, "a port number");
+			if (!value) return 1;
+			const auto port = parse_port(value);
+			if (!port)
+			{
+				std::cerr << "Error: " << arg << " must be a port number (0-65535)" << std::endl;
+				return 1;
+			}
+			local_port = *port;
 		}
 		else if (arg == "-c" || arg == "--connect")
 		{
-			if (i + 1 < argc) connect_to = argv[++i];
+			const char* value = next_value(i, arg, "HOST:PORT");
+			if (!value) return 1;
+			connect_to = value;
 		}
 		else if (arg == "-v" || arg == "--verbose")
 		{
@@ -359,27 +373,30 @@ int main(int argc, char* argv[])
 		}
 		else if (arg == "--ip")
 		{
-			if (i + 1 < argc) vpn_ip = argv[++i];
+			const char* value = next_value(i, arg, "an IPv4 address");
+			if (!value) return 1;
+			vpn_ip = value;
 		}
 		else if (arg == "--mask")
 		{
-			if (i + 1 < argc) vpn_mask = argv[++i];
+			const char* value = next_value(i, arg, "a subnet mask");
+			if (!value) return 1;
+			vpn_mask = value;
 		}
 		else if (arg == "--gw")
 		{
-			if (i + 1 < argc) vpn_gw = argv[++i];
+			const char* value = next_value(i, arg, "a gateway address");
+			if (!value) return 1;
+			vpn_gw = value;
 		}
 		else if (arg == "--forwarding")
 		{
-			if (i + 1 >= argc)
-			{
-				std::cerr << "Error: --forwarding requires hub or route" << std::endl;
-				return 1;
-			}
-			const std::string value = argv[++i];
-			if (value == "hub")
+			const char* value = next_value(i, arg, "hub or route");
+			if (!value) return 1;
+			const std::string mode_name = value;
+			if (mode_name == "hub")
 				forwarding = forwarding_mode::hub;
-			else if (value == "route")
+			else if (mode_name == "route")
 				forwarding = forwarding_mode::route;
 			else
 			{
@@ -389,25 +406,21 @@ int main(int argc, char* argv[])
 		}
 		else if (arg == "--tun-name")
 		{
-			if (i + 1 >= argc)
-			{
-				std::cerr << "Error: --tun-name requires a device name" << std::endl;
-				return 1;
-			}
-			tun_name = argv[++i];
+			const char* value = next_value(i, arg, "a device name");
+			if (!value) return 1;
+			tun_name = value;
 		}
 		else if (arg == "--tap-guid")
 		{
-			if (i + 1 >= argc)
-			{
-				std::cerr << "Error: --tap-guid requires an adapter GUID" << std::endl;
-				return 1;
-			}
-			tap_guid = argv[++i];
+			const char* value = next_value(i, arg, "an adapter GUID");
+			if (!value) return 1;
+			tap_guid = value;
 		}
 		else if (arg == "-k" || arg == "--seed-key")
 		{
-			if (i + 1 < argc) seed_key = argv[++i];
+			const char* value = next_value(i, arg, "a key");
+			if (!value) return 1;
+			seed_key = value;
 		}
 		else if (arg == "--lepv1")
 		{
@@ -417,27 +430,9 @@ int main(int argc, char* argv[])
 		{
 			encoder = encode_scheme::raw;
 		}
-		else if (arg == "--max-bootstrap")
+		else
 		{
-			if (i + 1 < argc) { max_phone = argv[++i]; maxcalls_mode = true; }
-		}
-		else if (arg == "--max-qr-bootstrap")
-		{
-			max_qr_bootstrap = true;
-			maxcalls_mode = true;
-		}
-		else if (arg == "--max-token")
-		{
-			if (i + 1 < argc) { max_token = argv[++i]; maxcalls_mode = true; }
-		}
-		else if (arg == "--max-call")
-		{
-			if (i + 1 < argc) { max_call_peer = argv[++i]; maxcalls_mode = true; }
-		}
-		else if (arg == "--max-wait")
-		{
-			max_wait = true;
-			maxcalls_mode = true;
+			std::cerr << "[Warning] Ignoring unknown option: " << arg << std::endl;
 		}
 	}
 
@@ -463,126 +458,11 @@ int main(int argc, char* argv[])
 	}
 #endif
 
-	if (max_token.empty())
-	{
-#ifdef _WIN32
-		char* env_token = nullptr;
-		size_t env_token_len = 0;
-		if (_dupenv_s(&env_token, &env_token_len, "MAXCALLS_TOKEN") == 0 && env_token)
-		{
-			if (*env_token)
-				max_token = env_token;
-			free(env_token);
-		}
-#else
-		const char* env_token = std::getenv("MAXCALLS_TOKEN");
-		if (env_token && *env_token)
-		{
-			max_token = env_token;
-		}
-#endif
-	}
-
-	// Validate maxcalls configuration early
-	if (maxcalls_mode)
-	{
-		if (!max_phone.empty() || max_qr_bootstrap)
-		{
-			// Run one-time authentication bootstrap and exit.
-			try
-			{
-				maxcalls::Bootstrap boot;
-				auto qr_login = [&boot]() {
-					return boot.login_with_qr(
-						[](const std::string& link) {
-							std::cout << "[maxcalls] Open this link on a phone with MAX installed, "
-							             "or render it as a QR code and scan it:\n"
-							          << link << "\n[maxcalls] Waiting for approval..." << std::endl;
-						},
-						[](const std::string& hint) {
-							std::cout << "[maxcalls] Enter the account's two-factor password";
-							if (!hint.empty()) std::cout << " (hint: " << hint << ")";
-							std::cout << ": " << std::flush;
-							std::string password;
-							std::getline(std::cin, password);
-							return password;
-						});
-				};
-
-				std::string login;
-				if (max_qr_bootstrap)
-				{
-					std::cout << "[maxcalls] Initializing QR bootstrap" << std::endl;
-					login = qr_login();
-				}
-				else
-				{
-					std::cout << "[maxcalls] Initializing bootstrap for phone: " << max_phone << std::endl;
-					try
-					{
-						std::string vtoken = boot.request_code(max_phone);
-						std::cout << "[maxcalls] SMS verification code sent. Please enter the code: " << std::flush;
-						std::string code;
-						std::getline(std::cin, code);
-						login = boot.submit_code(vtoken, code);
-					}
-					catch (const std::exception& sms_error)
-					{
-						const std::string message = sms_error.what();
-						if (message.find("captcha.validation-failed") == std::string::npos)
-							throw;
-						std::cout << "[maxcalls] MAX requires a web CAPTCHA before SMS. "
-						             "Switching to QR bootstrap." << std::endl;
-						login = qr_login();
-					}
-				}
-
-				std::cout << "\n[maxcalls] Successfully authenticated! Durable Login Token:\n" << login << std::endl;
-				std::cout << "You can set this in the MAXCALLS_TOKEN environment variable or pass via --max-token option." << std::endl;
-				return 0;
-			}
-			catch (const std::exception& e)
-			{
-				std::cerr << "Bootstrap failed: " << e.what() << std::endl;
-				return 1;
-			}
-		}
-
-		if (max_token.empty())
-		{
-			std::cerr << "Error: maxcalls mode requires a login token. Use --max-qr-bootstrap (recommended) or --max-bootstrap PHONE to get one, or set --max-token / MAXCALLS_TOKEN env variable." << std::endl;
-			return 1;
-		}
-
-		if (!max_wait && max_call_peer.empty())
-		{
-			std::cerr << "Error: maxcalls mode requires either --max-wait (to wait for calls) or --max-call PEER_ID (to call a peer)." << std::endl;
-			return 1;
-		}
-
-		if (vpn_ip.empty())
-		{
-			if (max_wait)
-			{
-				vpn_ip = "10.0.0.1";
-				vpn_mask = "255.255.255.0";
-			}
-			else
-			{
-				vpn_ip = "10.0.0.2";
-				vpn_mask = "255.255.255.0";
-				vpn_gw = "10.0.0.1";
-			}
-		}
-	}
-
 	// ---------------------------------------------------------------
 	// Determine run mode
 	// ---------------------------------------------------------------
 	run_mode mode;
 	setup_state auto_state;
-	std::string maxcalls_bind_ip; // physical uplink IP the maxcalls transport binds to
-	std::function<bool(const std::string&)> maxcalls_address_callback;
 	std::string adapter_identifier;
 
 #ifdef _WIN32
@@ -647,20 +527,22 @@ int main(int argc, char* argv[])
 	// ---------------------------------------------------------------
 	// Parse host:port from -c argument (needed early for DNS resolution)
 	// ---------------------------------------------------------------
-	std::string server_host, server_port;
+	std::string server_host;
+	uint16_t server_port = 0;
 	if (!connect_to.empty())
 	{
-		size_t colon_pos = connect_to.find(':');
-		if (colon_pos != std::string::npos)
+		const size_t colon_pos = connect_to.find(':');
+		std::optional<uint16_t> port;
+		if (colon_pos != std::string::npos && colon_pos > 0)
+			port = parse_port(std::string_view(connect_to).substr(colon_pos + 1));
+
+		if (!port || *port == 0)
 		{
-			server_host = connect_to.substr(0, colon_pos);
-			server_port = connect_to.substr(colon_pos + 1);
-		}
-		else
-		{
-			std::cerr << "Error: Invalid format for -c. Use HOST:PORT" << std::endl;
+			std::cerr << "Error: Invalid format for -c. Use HOST:PORT (port 1-65535)" << std::endl;
 			return 1;
 		}
+		server_host = connect_to.substr(0, colon_pos);
+		server_port = *port;
 	}
 
 	// ---------------------------------------------------------------
@@ -699,43 +581,17 @@ int main(int argc, char* argv[])
 		}
 	}
 
-	// A full-tunnel maxcalls caller must preserve its own control/data transport
-	// on the physical uplink. Linux uses source-policy routing; Windows owns a
-	// dynamic set of /32 routes reported by AVTTS. This must happen before the
-	// TAP/TUN default-route override is installed.
-	if (maxcalls_mode && !max_wait && !vpn_gw.empty())
-	{
-		if (maxcalls_policy_setup(auto_state))
-		{
-			maxcalls_bind_ip = auto_state.wan_local_ip;
-			maxcalls_address_callback = [&auto_state](const std::string& address) {
-				return maxcalls_policy_add_transport_address(auto_state, address);
-			};
-		}
-		else
-		{
-			std::cerr << "[maxcalls] Could not set up transport bypass; refusing to enable "
-			             "a looping full tunnel." << std::endl;
-			if (mode == run_mode::server) server_teardown(auto_state);
-			else if (mode == run_mode::client) client_teardown(auto_state);
-			return 1;
-		}
-	}
+	auto teardown_auto_setup = [&mode, &auto_state]() {
+		if (mode == run_mode::server)
+			server_teardown(auto_state);
+		else if (mode == run_mode::client)
+			client_teardown(auto_state);
+	};
 
 	try
 	{
-		std::shared_ptr<tunnel_interface> tunnel;
-
-		if (maxcalls_mode)
-		{
-			tunnel = std::make_shared<maxcalls_tunnel>(max_token, max_wait, max_call_peer, encoder,
-				maxcalls_bind_ip, maxcalls_address_callback);
-		}
-		else
-		{
-			// Create P2P tunnel
-			tunnel = std::make_shared<p2p_tunnel>(local_port, encoder);
-		}
+		// Create P2P tunnel
+		auto tunnel = std::make_shared<p2p_tunnel>(local_port, encoder);
 
 		// Set encryption key if provided
 		if (!seed_key.empty())
@@ -744,23 +600,20 @@ int main(int argc, char* argv[])
 			std::cout << "[Tunnel] Encryption enabled with seed key" << std::endl;
 		}
 
-		// Create VPN interface
-		const bool learn_peer_routes = server_mode ||
-			(connect_to.empty() && (!maxcalls_mode || max_wait));
+		// Create VPN interface. Only the listening side learns which peer owns
+		// each VPN address; a connecting client has a single upstream peer.
+		const bool learn_peer_routes = server_mode || connect_to.empty();
 		auto vpn = std::make_shared<vpn_interface>(
 			tunnel, adapter_identifier, forwarding, learn_peer_routes);
 
-		if (!maxcalls_mode)
-		{
-			// Set up tunnel callbacks
-			std::static_pointer_cast<p2p_tunnel>(tunnel)->set_connection_callback([](const boost::asio::ip::udp::endpoint& peer) {
-				std::cout << "[Tunnel] Connected to peer: " << peer.address().to_string() << ":" << peer.port() << std::endl;
-			});
-		}
+		// Set up tunnel callbacks
+		tunnel->set_connection_callback([](const boost::asio::ip::udp::endpoint& peer) {
+			std::cout << "[Tunnel] Connected to peer: " << peer.address().to_string() << ":" << peer.port() << std::endl;
+		});
 
 		// Configure the VPN interface before starting the transport. On Windows
-		// this also removes stale full-tunnel routes from the selected TAP before
-		// maxcalls performs its first DNS lookup.
+		// this also removes full-tunnel routes left on the selected TAP by an
+		// interrupted run, so the legacy-mode peer lookup is not trapped in them.
 		std::cout << "[VPN] Starting VPN interface on " << vpn_ip
 		          << " with " << (forwarding == forwarding_mode::route ? "routed" : "hub")
 		          << " forwarding";
@@ -776,46 +629,37 @@ int main(int argc, char* argv[])
 			std::cerr << "Failed to start VPN interface. Make sure you have "
 			          << "Administrator privileges (Windows) or root (Linux)." << std::endl;
 			// Teardown auto-setup before exiting
-			if (mode == run_mode::server) server_teardown(auto_state);
-			else if (mode == run_mode::client) client_teardown(auto_state);
-			maxcalls_policy_teardown(auto_state);
+			teardown_auto_setup();
 			return 1;
 		}
 
 		// Start tunnel
 		tunnel->start();
+		tunnel->run_in_thread();
 
-		if (!maxcalls_mode)
+		// Get local endpoint
+		auto local_ep = tunnel->get_local_endpoint();
+		std::cout << "[Tunnel] Listening on " << local_ep.address().to_string()
+		          << ":" << local_ep.port() << std::endl;
+
+		// Connect to peer if specified
+		if (!connect_to.empty())
 		{
-			std::static_pointer_cast<p2p_tunnel>(tunnel)->run_in_thread();
-		}
+			std::cout << "[Tunnel] Connecting to " << server_host << ":" << server_port << "..." << std::endl;
 
-		if (!maxcalls_mode)
-		{
-			// Get local endpoint
-			auto local_ep = std::static_pointer_cast<p2p_tunnel>(tunnel)->get_local_endpoint();
-			std::cout << "[Tunnel] Listening on " << local_ep.address().to_string()
-			          << ":" << local_ep.port() << std::endl;
-
-			// Connect to peer if specified
-			if (!connect_to.empty())
+			if (mode == run_mode::client)
 			{
-				std::cout << "[Tunnel] Connecting to " << server_host << ":" << server_port << "..." << std::endl;
-
-				if (mode == run_mode::client)
-				{
-					// Use pre-resolved IP directly (skip async DNS)
-					boost::asio::ip::udp::endpoint server_ep(
-						boost::asio::ip::make_address_v4(auto_state.server_public_ip),
-						static_cast<unsigned short>(std::stoi(server_port))
-					);
-					std::static_pointer_cast<p2p_tunnel>(tunnel)->connect_to_peer(server_ep);
-				}
-				else
-				{
-					// Legacy mode: use async DNS resolution
-					std::static_pointer_cast<p2p_tunnel>(tunnel)->connect_to_peer(server_host, server_port);
-				}
+				// Use pre-resolved IP directly (skip async DNS)
+				boost::asio::ip::udp::endpoint server_ep(
+					boost::asio::ip::make_address_v4(auto_state.server_public_ip),
+					server_port
+				);
+				tunnel->connect_to_peer(server_ep);
+			}
+			else
+			{
+				// Legacy mode: use async DNS resolution
+				tunnel->connect_to_peer(server_host, std::to_string(server_port));
 			}
 		}
 
@@ -892,22 +736,14 @@ int main(int argc, char* argv[])
 		vpn->stop();
 		tunnel->stop();
 
-		if (mode == run_mode::server)
-			server_teardown(auto_state);
-		else if (mode == run_mode::client)
-			client_teardown(auto_state);
-		maxcalls_policy_teardown(auto_state);
+		teardown_auto_setup();
 	}
 	catch (const std::exception& e)
 	{
 		std::cerr << "Error: " << e.what() << std::endl;
 
 		// Best-effort teardown on exception
-		if (mode == run_mode::server)
-			server_teardown(auto_state);
-		else if (mode == run_mode::client)
-			client_teardown(auto_state);
-		maxcalls_policy_teardown(auto_state);
+		teardown_auto_setup();
 
 		return 1;
 	}

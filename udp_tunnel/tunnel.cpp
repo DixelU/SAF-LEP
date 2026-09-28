@@ -76,20 +76,17 @@ p2p_tunnel::p2p_tunnel(uint16_t local_port, encode_scheme scheme):
 	maintenance_timer_(io_context_),
 	local_endpoint_(boost::asio::ip::udp::v4(), local_port)
 {
+	// Fail construction outright: a tunnel without a bound socket would otherwise
+	// report itself as listening while never receiving anything.
 	boost::system::error_code ec;
 	socket_.open(boost::asio::ip::udp::v4(), ec);
 	if (ec)
-	{
-		std::cerr << "Failed to open socket: " << ec.message() << std::endl;
-		return;
-	}
+		throw std::runtime_error("Failed to open UDP socket: " + ec.message());
 
 	socket_.bind(local_endpoint_, ec);
 	if (ec)
-	{
-		std::cerr << "Failed to bind socket: " << ec.message() << std::endl;
-		return;
-	}
+		throw std::runtime_error("Failed to bind UDP port " + std::to_string(local_port) +
+			": " + ec.message());
 
 	local_endpoint_ = socket_.local_endpoint();
 }
@@ -333,9 +330,7 @@ void p2p_tunnel::broadcast(const std::vector<uint8_t>& data)
 	if (data.empty())
 		return;
 
-	// Copy the list of peers effectively to avoid holding the lock while sending?
-	// Actually send_to_peer_async is thread safe for global peers map access, 
-	// but we need a snapshot of connected peers.
+	// Send to a snapshot so peers_mutex_ is not held across the sends.
 	auto connected_peers = get_connected_peers();
 	if (connected_peers.empty())
 	{
@@ -400,16 +395,13 @@ static uint32_t get_u32(const std::vector<uint8_t>& value, size_t index)
 
 void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet& decoded)
 {
-	// Parse header: [PacketID(2)][FragIndex(1)][TotalFrags(1)]
+	// Parse header: [PacketID(4)][FragIndex(1)][TotalFrags(1)]
 	if (decoded.data.size() < 6)
 	{
-		// Treat as legacy/handshake if size 1 and 0x00?
-		// Handshake, pass through
-		if (decoded.data.size() == 1 && decoded.data[0] == 0x00)
-			return;
-
-		if (decoded.data.size() >= 1)
-			handle_control_packet(peer, decoded);
+		// Short control packet. handle_receive has already consumed legacy
+		// handshakes and rejected anything is_structurally_valid_session_packet
+		// does not recognize.
+		handle_control_packet(peer, decoded);
 	}
 	else if (decoded.data[5] == 0)
 	{
@@ -495,9 +487,6 @@ void p2p_tunnel::handle_fragmentation(peer_connection& peer, dixelu::lep::packet
 		// Call callback outside lock
 		if (!completed_packet.empty())
 		{
-			if (completed_packet.size() == 1 && completed_packet[0] == 0x00)
-				return;
-
 			stats_.packets_received++;
 			stats_.add_event(packet_event_type::received, packet_id, completed_packet.size(), endpoint_to_string(remote_endpoint_));
 
@@ -901,8 +890,7 @@ void p2p_tunnel::internal_cleanup_procedure(peer_connection& peer)
 		if (data.received_frags_count != data.total_frags)
 			continue;
 
-		if (std::chrono::duration_cast<std::chrono::seconds>(curr - data.last_request_time).count() <
-			2 /* rerequest timeout in seconds */ * 10 )
+		if (curr - data.last_request_time < completed_reassembly_linger_)
 			continue;
 
 		// check for some REALLY lossy connection (packets are barely going through)
@@ -1118,15 +1106,11 @@ void p2p_tunnel::run_peer_maintenance(peer_connection& peer)
 
 void p2p_tunnel::send_fragments(peer_connection& peer_conn, uint32_t packet_id, const std::vector<uint8_t>& data)
 {
+	// send_to_peer_async has already rejected packets needing more than 255
+	// fragments, before a packet id was consumed.
 	size_t total_size = data.size();
 	size_t num_frags = (total_size + MAX_FRAGMENT_SIZE - 1) / MAX_FRAGMENT_SIZE;
 	uint8_t total_frags_u8 = static_cast<uint8_t>(num_frags);
-
-	if (total_frags_u8 < num_frags)
-	{
-		std::cerr << "[Tunnel] Excessive fragmentation - " << num_frags << " fragments cannot be sent through the tunnel" << std::endl;
-		return;
-	}
 
 	// Track sent packet
 	stats_.packets_sent++;
@@ -1286,8 +1270,6 @@ void p2p_tunnel::connect_to_peer(const boost::asio::ip::udp::endpoint& endpoint)
 		connection_callback_(endpoint);
 	}
 }
-
-// ... (rest of p2p_tunnel methods unchanged) ...
 
 boost::asio::ip::udp::endpoint p2p_tunnel::get_local_endpoint() const
 {
@@ -1828,20 +1810,12 @@ void vpn_interface::handle_tunnel_packet(const std::vector<uint8_t>& data, const
 
 	tunnel_->get_stats().tap_bytes_out += data.size();
 
-	// Filter out control packets or too small packets (min IPv4 header is 20 bytes)
+	// Drop anything shorter than a minimal IPv4 header (20 bytes). Handshakes
+	// and control packets never reach this callback.
 	if (data.size() < 20)
 	{
-		// This might be a handshake packet (0x00) or other control data
-		if (data.size() == 1 && data[0] == 0x00)
-		{
-			if (VERBOSE_MODE)
-				std::cout << "[VPN] Handshake packet received (ignored)" << std::endl;
-		}
-		else
-		{
-			if (VERBOSE_MODE)
-				std::cout << "[VPN] Dropping small packet: size=" << data.size() << std::endl;
-		}
+		if (VERBOSE_MODE)
+			std::cout << "[VPN] Dropping small packet: size=" << data.size() << std::endl;
 		return;
 	}
 

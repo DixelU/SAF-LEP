@@ -41,5 +41,26 @@
     <ClInclude Include="lep\strong_encryption.h">
       <Filter>Файлы заголовков</Filter>
     </ClInclude>
+    <ClInclude Include="udp_tunnel\auto_setup.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
+    <ClInclude Include="udp_tunnel\global_flags.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
+    <ClInclude Include="udp_tunnel\ip_routing.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
+    <ClInclude Include="udp_tunnel\linux_tun.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
+    <ClInclude Include="udp_tunnel\reconnect_handshake.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
+    <ClInclude Include="udp_tunnel\tunnel.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
+    <ClInclude Include="udp_tunnel\windows_tap.h">
+      <Filter>Файлы заголовков</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
