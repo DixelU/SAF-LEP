@@ -266,7 +266,11 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 		if (!decoded.data.empty())
 			handle_fragmentation(peer, decoded);
 
-		internal_cleanup_procedure(peer);
+		// internal_cleanup_procedure is deliberately not called here: it walks the
+		// whole reassembly buffer, which holds every packet of the last
+		// completed_reassembly_linger_ seconds, so running it per datagram cost
+		// O(datagrams/s * packets/s) and pinned the IO thread at a few hundred
+		// packets per second. The 1s maintenance sweep runs it instead.
 	}
 	catch (const std::exception& e)
 	{
