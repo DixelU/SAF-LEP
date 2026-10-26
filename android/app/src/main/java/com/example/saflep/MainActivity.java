@@ -11,6 +11,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.TextUtils;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -36,6 +37,7 @@ public final class MainActivity extends Activity {
     private TextView endpointValue;
     private TextView routeValue;
     private Button actionButton;
+    private SafLepVpnService.ConnectionState renderedState;
     private Intent pendingServiceIntent;
 
     @Override
@@ -117,6 +119,7 @@ public final class MainActivity extends Activity {
                 Typeface.NORMAL
         );
         statusPreview.setMaxLines(6);
+        statusPreview.setEllipsize(TextUtils.TruncateAt.END);
         statusPreview.setLineSpacing(0f, 1.18f);
         statusPanel.addView(statusPreview, HudUi.topMargin(this, 12));
         content.addView(statusPanel);
@@ -178,8 +181,7 @@ public final class MainActivity extends Activity {
 
     private void handlePrimaryAction() {
         SafLepVpnService.ConnectionState state = SafLepVpnService.getConnectionState();
-        if (state == SafLepVpnService.ConnectionState.STARTING
-                || state == SafLepVpnService.ConnectionState.CONNECTED) {
+        if (state.isStoppable()) {
             requestVpnStop();
         } else if (state != SafLepVpnService.ConnectionState.STOPPING) {
             requestVpnStart();
@@ -272,6 +274,18 @@ public final class MainActivity extends Activity {
                 action = "CANCEL CONNECTION";
                 color = HudUi.CYAN;
                 break;
+            case AWAITING_PEER:
+                code = "··";
+                headline = "AWAITING PEER";
+                action = "CANCEL CONNECTION";
+                color = HudUi.CYAN;
+                break;
+            case PEER_SILENT:
+                code = "?!";
+                headline = "PEER SILENT";
+                action = "TERMINATE LINK";
+                color = HudUi.AMBER;
+                break;
             case STOPPING:
                 code = "--";
                 headline = "SHUTTING DOWN";
@@ -298,9 +312,16 @@ public final class MainActivity extends Activity {
         stateCode.setTextColor(color);
         stateHeadline.setText(headline);
         statusPreview.setText(SafLepVpnService.getStatusSummary());
+        if (state == renderedState) return;
+
+        // The button only changes with the state; skip rebuilding its
+        // background on every 500 ms poll.
+        renderedState = state;
         actionButton.setText(action);
         actionButton.setEnabled(enabled);
-        int actionColor = state == SafLepVpnService.ConnectionState.CONNECTED
+        // Red for anything that tears a session down, including cancelling one
+        // that is still starting.
+        int actionColor = state.isStoppable()
                 ? HudUi.RED
                 : (state == SafLepVpnService.ConnectionState.STOPPING ? HudUi.AMBER : HudUi.GREEN);
         actionButton.setBackground(new HudPanelDrawable(

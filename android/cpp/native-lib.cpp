@@ -34,7 +34,10 @@
 namespace
 {
 
-// Global instances (simplified for single VPN connection)
+// Global instances (simplified for single VPN connection). The status poller
+// runs on the UI thread while start/stop run on service worker threads, so the
+// pointers are only swapped or copied under g_state_mutex.
+std::mutex g_state_mutex;
 std::shared_ptr<dixelu::udp::p2p_tunnel> g_tunnel;
 std::unique_ptr<dixelu::udp::vpn_interface> g_vpn;
 std::atomic<bool> g_running{false};
@@ -56,6 +59,31 @@ std::string getLastError()
 {
 	std::lock_guard<std::mutex> lock(g_error_mutex);
 	return g_last_error;
+}
+
+std::shared_ptr<dixelu::udp::p2p_tunnel> currentTunnel()
+{
+	std::lock_guard<std::mutex> lock(g_state_mutex);
+	return g_tunnel;
+}
+
+// Coarse link state reported to Java; keep in sync with SafLepVpnService.
+enum link_phase : jint
+{
+	LINK_NO_REPLY = 0,      // nothing received from the server yet
+	LINK_UNREADABLE = 1,    // datagrams arrive but none proved a shared key/scheme
+	LINK_VERIFIED = 2,      // the server answered with decodable tunnel traffic
+	LINK_PEER_SILENT = 3,   // verified earlier, now timed out and being re-probed
+};
+
+link_phase linkPhase(const dixelu::udp::p2p_tunnel& tunnel)
+{
+	const auto& stats = tunnel.get_stats();
+	const bool verified = stats.verified_handshake_replies.load() > 0 ||
+		stats.packets_received.load() > 0;
+	if (!verified)
+		return stats.bytes_received.load() > 0 ? LINK_UNREADABLE : LINK_NO_REPLY;
+	return tunnel.get_connected_peers().empty() ? LINK_PEER_SILENT : LINK_VERIFIED;
 }
 
 /**
@@ -188,16 +216,26 @@ Java_com_example_saflep_SafLepVpnService_startNativeVpn(
 	env->ReleaseStringUTFChars(server_ip, ip_cstr);
 	env->ReleaseStringUTFChars(seed_key, key_cstr);
 
+	std::shared_ptr<dixelu::udp::p2p_tunnel> tunnel;
+	std::unique_ptr<dixelu::udp::vpn_interface> vpn;
 	try
 	{
+		// Java resolves the host before establishing the catch-all VPN route. Use
+		// the numeric endpoint directly here so no DNS lookup can be trapped in TUN.
+		if (ip_str.empty() || server_port <= 0 || server_port > 65535)
+			throw std::runtime_error("Invalid server endpoint");
+		const boost::asio::ip::udp::endpoint server_endpoint(
+			boost::asio::ip::make_address_v4(ip_str),
+			static_cast<unsigned short>(server_port));
+
 		// Create the P2P tunnel
 		// Use port 0 to let the OS assign a port
 		const auto scheme = encoding_scheme == 2
 			? dixelu::udp::encode_scheme::raw
 			: encoding_scheme == 1 ? dixelu::udp::encode_scheme::lep_v1
 			                       : dixelu::udp::encode_scheme::lep_v0;
-		g_tunnel = std::make_shared<dixelu::udp::p2p_tunnel>(0, scheme);
-		const int socket_fd = g_tunnel->get_socket_fd();
+		tunnel = std::make_shared<dixelu::udp::p2p_tunnel>(0, scheme);
+		const int socket_fd = tunnel->get_socket_fd();
 		if (socket_fd < 0 || !protectSocket(socket_fd))
 		{
 			throw std::runtime_error("Failed to protect the tunnel UDP socket");
@@ -206,56 +244,54 @@ Java_com_example_saflep_SafLepVpnService_startNativeVpn(
 		// Set encryption key if provided
 		if (!key_str.empty())
 		{
-			g_tunnel->set_encryption_key(key_str);
+			tunnel->set_encryption_key(key_str);
 			LOGI("Encryption key set");
 		}
 
 		// Create the VPN interface
-		g_vpn = std::make_unique<dixelu::udp::vpn_interface>(g_tunnel);
+		vpn = std::make_unique<dixelu::udp::vpn_interface>(tunnel);
 
-		// Start the tunnel (async I/O)
-		g_tunnel->start();
-		g_tunnel->run_in_thread();
+		// Arm the receive loop, then register the server before anything reads
+		// the TUN. Android queues the apps' first packets (DNS queries, TCP
+		// sockets it just reset for the new route) as soon as establish()
+		// returns, and broadcast() discards everything while no peer is
+		// connected, so reading first would throw that initial burst away.
+		tunnel->start();
+		LOGI("Connecting to peer: %s:%d", ip_str.c_str(), server_port);
+		tunnel->connect_to_peer(server_endpoint);
 
-		// Start the VPN interface with the TUN file descriptor
-		if (!g_vpn->start_android(tun_fd))
+		// start_android() installs the tunnel's packet callback. Doing it before
+		// the IO thread exists means the callback is never reassigned while a
+		// receive handler might be reading it.
+		if (!vpn->start_android(tun_fd))
 		{
-			LOGE("Failed to start VPN interface");
-			setLastError("Failed to duplicate or start the Android TUN interface");
-			g_tunnel->stop();
-			g_tunnel.reset();
-			g_vpn.reset();
-			env->DeleteGlobalRef(g_vpn_service);
-			g_vpn_service = nullptr;
-			g_running = false;
-			return JNI_FALSE;
+			throw std::runtime_error("Failed to duplicate or start the Android TUN interface");
 		}
 
-		// Java resolves the host before establishing the catch-all VPN route. Use
-		// the numeric endpoint directly here so no DNS lookup can be trapped in TUN.
-		if (!ip_str.empty() && server_port > 0)
-		{
-			LOGI("Connecting to peer: %s:%d", ip_str.c_str(), server_port);
-			g_tunnel->connect_to_peer(boost::asio::ip::udp::endpoint(
-				boost::asio::ip::make_address_v4(ip_str),
-				static_cast<unsigned short>(server_port)));
-		}
-
-		LOGI("Native VPN started successfully");
-		return JNI_TRUE;
-
+		tunnel->run_in_thread();
 	}
 	catch (const std::exception& e)
 	{
 		LOGE("Exception starting VPN: %s", e.what());
 		setLastError(e.what());
-		g_tunnel.reset();
-		g_vpn.reset();
+		// The VPN interface goes first: it joins the TUN reader, which still
+		// forwards into the tunnel.
+		vpn.reset();
+		tunnel.reset();
 		env->DeleteGlobalRef(g_vpn_service);
 		g_vpn_service = nullptr;
 		g_running = false;
 		return JNI_FALSE;
 	}
+
+	{
+		std::lock_guard<std::mutex> lock(g_state_mutex);
+		g_tunnel = std::move(tunnel);
+		g_vpn = std::move(vpn);
+	}
+
+	LOGI("Native VPN started successfully");
+	return JNI_TRUE;
 }
 
 /**
@@ -271,24 +307,28 @@ Java_com_example_saflep_SafLepVpnService_stopNativeVpn(JNIEnv* env, jobject thiz
 
 	LOGI("Stopping native VPN");
 
+	// Detach the instances first so a concurrent status query either sees none
+	// or keeps its own reference alive; the blocking joins happen unlocked.
+	std::shared_ptr<dixelu::udp::p2p_tunnel> tunnel;
+	std::unique_ptr<dixelu::udp::vpn_interface> vpn;
+	{
+		std::lock_guard<std::mutex> lock(g_state_mutex);
+		tunnel = std::move(g_tunnel);
+		vpn = std::move(g_vpn);
+	}
+
 	try
 	{
-		if (g_vpn)
+		if (vpn)
 		{
-			g_vpn->stop();
-			g_vpn.reset();
+			vpn->stop();
+			vpn.reset();
 		}
 
-		if (g_tunnel)
+		if (tunnel)
 		{
-			g_tunnel->stop();
-			g_tunnel.reset();
-		}
-
-		if (g_vpn_service)
-		{
-			env->DeleteGlobalRef(g_vpn_service);
-			g_vpn_service = nullptr;
+			tunnel->stop();
+			tunnel.reset();
 		}
 
 		LOGI("Native VPN stopped");
@@ -297,6 +337,12 @@ Java_com_example_saflep_SafLepVpnService_stopNativeVpn(JNIEnv* env, jobject thiz
 	catch (const std::exception& e)
 	{
 		LOGE("Exception stopping VPN: %s", e.what());
+	}
+
+	if (g_vpn_service)
+	{
+		env->DeleteGlobalRef(g_vpn_service);
+		g_vpn_service = nullptr;
 	}
 }
 
@@ -316,10 +362,24 @@ Java_com_example_saflep_SafLepVpnService_isVpnRunning(JNIEnv* env, jobject thiz)
 JNIEXPORT jint JNICALL
 Java_com_example_saflep_SafLepVpnService_getLocalPort(JNIEnv* env, jobject thiz)
 {
-	if (!g_tunnel)
+	const auto tunnel = currentTunnel();
+	if (!tunnel)
 		return -1;
 
-	return static_cast<jint>(g_tunnel->get_local_endpoint().port());
+	return static_cast<jint>(tunnel->get_local_endpoint().port());
+}
+
+/**
+ * Return the coarse link phase (see link_phase) for the status UI.
+ */
+JNIEXPORT jint JNICALL
+Java_com_example_saflep_SafLepVpnService_getLinkPhase(JNIEnv* env, jobject thiz)
+{
+	const auto tunnel = currentTunnel();
+	if (!tunnel || !g_running)
+		return LINK_NO_REPLY;
+
+	return linkPhase(*tunnel);
 }
 
 /**
@@ -328,21 +388,30 @@ Java_com_example_saflep_SafLepVpnService_getLocalPort(JNIEnv* env, jobject thiz)
 JNIEXPORT jstring JNICALL
 Java_com_example_saflep_SafLepVpnService_getNativeStatus(JNIEnv* env, jobject thiz)
 {
-	if (!g_tunnel || !g_running)
+	const auto tunnel = currentTunnel();
+	if (!tunnel || !g_running)
 		return env->NewStringUTF("Native tunnel is not running.");
 
-	const auto endpoint = g_tunnel->get_local_endpoint();
-	const auto& stats = g_tunnel->get_stats();
-	const auto received = stats.bytes_received.load();
+	const char* peer_state = "none yet";
+	switch (linkPhase(*tunnel))
+	{
+		case LINK_NO_REPLY: peer_state = "none yet"; break;
+		case LINK_UNREADABLE: peer_state = "undecodable (LEP version / seed key mismatch?)"; break;
+		case LINK_VERIFIED: peer_state = "verified"; break;
+		case LINK_PEER_SILENT: peer_state = "silent, re-probing"; break;
+	}
+
+	const auto endpoint = tunnel->get_local_endpoint();
+	const auto& stats = tunnel->get_stats();
 	std::ostringstream text;
 	text << "Local UDP: " << endpoint.port() << '\n'
-		 << "Peer traffic: " << (received > 0 ? "received" : "none yet") << '\n'
+		 << "Peer traffic: " << peer_state << '\n'
 		 << "UDP bytes: TX " << stats.bytes_sent.load()
-		 << " / RX " << received << '\n'
+		 << " / RX " << stats.bytes_received.load() << '\n'
 		 << "IP bytes: TUN->peer " << stats.tap_bytes_in.load()
 		 << " / peer->TUN " << stats.tap_bytes_out.load() << '\n'
-		 << "Peers (local state): " << g_tunnel->get_connected_peers().size()
-		 << " / " << g_tunnel->get_peer_count() << '\n'
+		 << "Peers (local state): " << tunnel->get_connected_peers().size()
+		 << " / " << tunnel->get_peer_count() << '\n'
 		 << "Packets dropped before a peer: " << stats.broadcast_drops.load();
 	return env->NewStringUTF(text.str().c_str());
 }
@@ -368,7 +437,8 @@ Java_com_example_saflep_SafLepVpnService_connectToPeer(
 	jint peer_port)
 {
 
-	if (!g_tunnel || !g_running) {
+	const auto tunnel = currentTunnel();
+	if (!tunnel || !g_running) {
 		LOGW("Cannot connect to peer: VPN not running");
 		return;
 	}
@@ -378,7 +448,7 @@ Java_com_example_saflep_SafLepVpnService_connectToPeer(
 	env->ReleaseStringUTFChars(peer_ip, ip_cstr);
 
 	LOGI("Connecting to additional peer: %s:%d", ip_str.c_str(), peer_port);
-	g_tunnel->connect_to_peer(ip_str, std::to_string(peer_port));
+	tunnel->connect_to_peer(ip_str, std::to_string(peer_port));
 }
 
 /**
@@ -392,7 +462,8 @@ Java_com_example_saflep_SafLepVpnService_setEncryptionKey(
 	jstring seed_key)
 {
 
-	if (!g_tunnel)
+	const auto tunnel = currentTunnel();
+	if (!tunnel)
 	{
 		LOGW("Cannot set key: tunnel not initialized");
 		return;
@@ -402,7 +473,7 @@ Java_com_example_saflep_SafLepVpnService_setEncryptionKey(
 	std::string key_str(key_cstr);
 	env->ReleaseStringUTFChars(seed_key, key_cstr);
 
-	g_tunnel->set_encryption_key(key_str);
+	tunnel->set_encryption_key(key_str);
 	LOGI("Encryption key updated");
 }
 

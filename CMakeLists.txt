@@ -25,10 +25,11 @@ set(SOURCES
 )
 
 if(WIN32)
-	list(APPEND SOURCES udp_tunnel/windows_tap.cpp)
+	set(ADAPTER_SOURCES udp_tunnel/windows_tap.cpp)
 else()
-	list(APPEND SOURCES udp_tunnel/linux_tun.cpp)
+	set(ADAPTER_SOURCES udp_tunnel/linux_tun.cpp)
 endif()
+list(APPEND SOURCES ${ADAPTER_SOURCES})
 
 add_executable(${PROJECT_NAME} ${SOURCES})
 
@@ -51,4 +52,19 @@ if(BUILD_TESTING)
 	add_executable(saf-lep-protocol-tests tests/protocol_tests.cpp)
 	target_compile_features(saf-lep-protocol-tests PRIVATE cxx_std_23)
 	add_test(NAME saf-lep-protocol-tests COMMAND saf-lep-protocol-tests)
+
+	# Runs two tunnels over 127.0.0.1; needs no TUN/TAP device or privileges.
+	add_executable(saf-lep-tunnel-tests
+		tests/tunnel_loopback_tests.cpp
+		udp_tunnel/tunnel.cpp
+		${ADAPTER_SOURCES}
+	)
+	target_include_directories(saf-lep-tunnel-tests PRIVATE ${Boost_INCLUDE_DIRS})
+	target_link_libraries(saf-lep-tunnel-tests PRIVATE Boost::system)
+	if(WIN32)
+		target_link_libraries(saf-lep-tunnel-tests PRIVATE ws2_32 iphlpapi)
+	else()
+		target_link_libraries(saf-lep-tunnel-tests PRIVATE pthread)
+	endif()
+	add_test(NAME saf-lep-tunnel-tests COMMAND saf-lep-tunnel-tests)
 endif()

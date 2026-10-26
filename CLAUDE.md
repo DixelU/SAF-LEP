@@ -19,6 +19,7 @@
 - `lep/strong_encryption.h` - ChaCha20-Poly1305 draft, not wired in yet
 - `lep/low_entropy_protocol.h` - LEP v0, LEP v1 and raw framing
 - `tests/protocol_tests.cpp` - Protocol unit tests (ctest)
+- `tests/tunnel_loopback_tests.cpp` - Two `p2p_tunnel`s over 127.0.0.1 (ctest, no TUN needed)
 
 ## CLI Modes
 - `-s -p PORT -k KEY` — Server auto-mode (Linux only, auto-NAT/iptables)

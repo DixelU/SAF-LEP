@@ -131,12 +131,18 @@ Server hostnames are resolved before the catch-all VPN route is installed, and
 the native bridge receives the resulting numeric IPv4 endpoint. This prevents
 the initial DNS lookup from being routed into a tunnel that is not ready yet.
 
+The link is reported online only after the server has answered with decodable
+tunnel traffic. Until then the launcher shows **AWAITING PEER**, and if a
+verified server later stays silent for 15 seconds it shows **PEER SILENT** while
+the tunnel re-probes it every 5 seconds.
+
 If the panel says **Peer traffic: none yet**, the local TUN and UDP socket are
 running but no datagram has returned from the server. Check that the server is
 listening on UDP, its firewall/NAT exposes the selected port, and both sides use
 the same LEP version and seed key. Rising `TUN->peer` and UDP TX counters with
 zero UDP RX narrow the problem to the server/network path rather than Android's
-VPN interface.
+VPN interface. **Peer traffic: undecodable** means datagrams do arrive but none
+decode as tunnel traffic, which points at a LEP version or seed key mismatch.
 
 ## Logging
 

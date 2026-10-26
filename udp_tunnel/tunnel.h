@@ -108,6 +108,10 @@ struct tunnel_stats
 	std::atomic<uint64_t> broadcast_drops{0};
 	std::atomic<uint64_t> route_drops{0};
 	std::atomic<uint64_t> route_conflicts{0};
+	// Reconnect replies that matched a nonce generated here (a challenge for our
+	// request, or a confirm for our challenge). A non-zero value proves the peer
+	// decodes our packets with the same LEP scheme and seed key.
+	std::atomic<uint64_t> verified_handshake_replies{0};
 
 	mutable std::mutex events_mutex;
 	std::deque<packet_event> recent_events;
@@ -308,6 +312,7 @@ private:
 	void internal_cleanup_procedure(peer_connection& peer);
 	void run_peer_maintenance(peer_connection& peer);
 	void reset_peer_session_locked(peer_connection& peer);
+	void reset_peer_receive_state_locked(peer_connection& peer);
 	
 	// Refactoring helpers
 	void process_packet_gap(peer_connection& peer, uint32_t packet_id);

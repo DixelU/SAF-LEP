@@ -115,11 +115,15 @@ public final class StatusActivity extends Activity {
         switch (state) {
             case CONNECTED:
                 stateColor = HudUi.GREEN;
-                if (summary.contains("Peer traffic: none yet")) {
-                    guidance = "The TUN and UDP socket are active, but the server has not replied. Check UDP exposure, matching LEP version, seed key, and server firewall.";
-                } else {
-                    guidance = "Peer traffic is present. TX/RX and TUN counters refresh once per second in the VPN service.";
-                }
+                guidance = "The server answered with decodable tunnel traffic. TX/RX and TUN counters refresh once per second in the VPN service.";
+                break;
+            case AWAITING_PEER:
+                stateColor = HudUi.CYAN;
+                guidance = "The TUN and UDP socket are active, but the server has not answered with decodable traffic yet. No reply at all points at UDP exposure or the server firewall; undecodable replies mean the LEP version or seed key differ.";
+                break;
+            case PEER_SILENT:
+                stateColor = HudUi.AMBER;
+                guidance = "The server answered earlier but has been silent for 15 s, so outgoing packets are held back. The tunnel re-probes it every 5 s and resumes on its own once it replies.";
                 break;
             case STARTING:
                 stateColor = HudUi.CYAN;
@@ -141,10 +145,7 @@ public final class StatusActivity extends Activity {
         }
         stateValue.setTextColor(stateColor);
         guidanceValue.setText(guidance);
-        disconnectButton.setEnabled(
-                state == SafLepVpnService.ConnectionState.STARTING
-                        || state == SafLepVpnService.ConnectionState.CONNECTED
-        );
+        disconnectButton.setEnabled(state.isStoppable());
     }
 
     private void requestStop() {

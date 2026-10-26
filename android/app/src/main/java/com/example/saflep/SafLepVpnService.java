@@ -38,10 +38,26 @@ public final class SafLepVpnService extends VpnService {
     public enum ConnectionState {
         DISCONNECTED,
         STARTING,
+        AWAITING_PEER,
         CONNECTED,
+        PEER_SILENT,
         STOPPING,
-        FAILED
+        FAILED;
+
+        /** True while a session exists that a disconnect request can stop. */
+        public boolean isStoppable() {
+            return this == STARTING
+                    || this == AWAITING_PEER
+                    || this == CONNECTED
+                    || this == PEER_SILENT;
+        }
     }
+
+    // Values returned by getLinkPhase(); keep in sync with link_phase in native-lib.cpp.
+    private static final int LINK_NO_REPLY = 0;
+    private static final int LINK_UNREADABLE = 1;
+    private static final int LINK_VERIFIED = 2;
+    private static final int LINK_PEER_SILENT = 3;
 
     private static volatile String statusSummary =
             "Disconnected\nNo active tunnel.";
@@ -53,17 +69,13 @@ public final class SafLepVpnService extends VpnService {
 
     private final Object lifecycleLock = new Object();
     private final Object nativeLifecycleLock = new Object();
+    private final Object notificationLock = new Object();
     private final Handler statusHandler = new Handler(Looper.getMainLooper());
     private final Runnable statusReporter = new Runnable() {
         @Override
         public void run() {
             if (!isVpnRunning() || stopRequested) return;
-            publishStatus(
-                    "Tunnel active",
-                    runningConfiguration + "\n" + getNativeStatus(),
-                    ConnectionState.CONNECTED
-            );
-            updateNotification("Tunnel active");
+            publishLinkStatus();
             statusHandler.postDelayed(this, 1000);
         }
     };
@@ -75,6 +87,12 @@ public final class SafLepVpnService extends VpnService {
     private volatile String runningConfiguration = "";
     private long lifecycleGeneration;
     private int latestStartId;
+    // A start requested while the previous session is still tearing down; it is
+    // replayed once the teardown finishes instead of being dropped.
+    private Intent pendingStartIntent;
+    private int pendingStartId;
+    private boolean inForeground;
+    private String notificationText = "";
 
     private native boolean startNativeVpn(
             int fd,
@@ -88,6 +106,7 @@ public final class SafLepVpnService extends VpnService {
     private native void stopNativeVpn();
     private native boolean isVpnRunning();
     private native int getLocalPort();
+    private native int getLinkPhase();
     private native String getNativeStatus();
     private native String getNativeLastError();
 
@@ -96,8 +115,7 @@ public final class SafLepVpnService extends VpnService {
     }
 
     public static boolean isActiveOrStarting() {
-        return connectionState == ConnectionState.STARTING
-                || connectionState == ConnectionState.CONNECTED
+        return connectionState.isStoppable()
                 || connectionState == ConnectionState.STOPPING;
     }
 
@@ -114,14 +132,16 @@ public final class SafLepVpnService extends VpnService {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) return START_NOT_STICKY;
-        latestStartId = startId;
 
         if (ACTION_STOP.equals(intent.getAction())) {
+            synchronized (lifecycleLock) {
+                latestStartId = Math.max(latestStartId, startId);
+                pendingStartIntent = null;
+            }
             beginShutdown(
                     "Disconnected",
                     "No active tunnel.",
                     ConnectionState.DISCONNECTED,
-                    startId,
                     true
             );
             return START_NOT_STICKY;
@@ -136,26 +156,37 @@ public final class SafLepVpnService extends VpnService {
             return START_NOT_STICKY;
         }
 
+        handleStart(intent, startId);
+        return START_NOT_STICKY;
+    }
+
+    private void handleStart(Intent intent, int startId) {
         final long generation;
         synchronized (lifecycleLock) {
-            if (isVpnRunning()
-                    || (startupThread != null && startupThread.isAlive())
-                    || (shutdownThread != null && shutdownThread.isAlive())) {
+            // Recorded under the same lock the teardown uses to pick its stop id,
+            // so a teardown finishing concurrently cannot stop this new session.
+            // A replayed start may be older than a command handled since.
+            latestStartId = Math.max(latestStartId, startId);
+            if (shutdownThread != null && shutdownThread.isAlive()) {
+                // Typically RETRY pressed right after a failure, while the failed
+                // session is still being torn down. Starting now would race that
+                // teardown and its stopSelf, so replay the request afterwards.
+                Log.i(TAG, "Deferring VPN start until the previous session has stopped");
+                pendingStartIntent = intent;
+                pendingStartId = startId;
+                return;
+            }
+            if (isVpnRunning() || (startupThread != null && startupThread.isAlive())) {
+                // The service is already in the foreground for that session, which
+                // also satisfies this startForegroundService() call.
                 Log.w(TAG, "Ignoring duplicate VPN start");
-                publishStatus(
-                        "Tunnel already active",
-                        runningConfiguration.isEmpty()
-                                ? "A connection attempt is already in progress."
-                                : runningConfiguration,
-                        connectionState
-                );
-                return START_NOT_STICKY;
+                return;
             }
             stopRequested = false;
             generation = ++lifecycleGeneration;
         }
 
-        startForeground(NOTIFICATION_ID, createNotification("Preparing tunnel..."));
+        showForeground("Preparing tunnel...");
 
         String serverHost = stringExtra(intent, EXTRA_SERVER_IP, "").trim();
         int serverPort = intent.getIntExtra(EXTRA_SERVER_PORT, 0);
@@ -178,7 +209,6 @@ public final class SafLepVpnService extends VpnService {
                     try {
                         startTunnel(
                                 generation,
-                                startId,
                                 serverHost,
                                 serverPort,
                                 seedKey,
@@ -198,12 +228,10 @@ public final class SafLepVpnService extends VpnService {
                 "saf-lep-start"
         );
         startupThread.start();
-        return START_NOT_STICKY;
     }
 
     private void startTunnel(
             long generation,
-            int startId,
             String serverHost,
             int serverPort,
             String seedKey,
@@ -301,12 +329,9 @@ public final class SafLepVpnService extends VpnService {
                 }
                 if (success) {
                     Log.i(TAG, "Native VPN started on UDP port " + getLocalPort());
-                    publishStatus(
-                            "Tunnel active",
-                            runningConfiguration + "\n" + getNativeStatus(),
-                            ConnectionState.CONNECTED
-                    );
-                    updateNotification("Tunnel active");
+                    // The link is only reported online once the server has
+                    // answered; until then this publishes AWAITING_PEER.
+                    publishLinkStatus();
                     statusHandler.removeCallbacks(statusReporter);
                     statusHandler.post(statusReporter);
                 } else {
@@ -336,7 +361,6 @@ public final class SafLepVpnService extends VpnService {
                     "Connection failed",
                     details,
                     ConnectionState.FAILED,
-                    startId,
                     false
             );
         }
@@ -350,7 +374,7 @@ public final class SafLepVpnService extends VpnService {
         }
         statusHandler.removeCallbacks(statusReporter);
         tearDownTunnel();
-        stopForeground(STOP_FOREGROUND_REMOVE);
+        hideForeground();
         if (connectionState != ConnectionState.FAILED
                 && connectionState != ConnectionState.DISCONNECTED) {
             publishStatus(
@@ -368,7 +392,6 @@ public final class SafLepVpnService extends VpnService {
                 "VPN permission revoked",
                 "Android revoked the VPN interface.",
                 ConnectionState.DISCONNECTED,
-                latestStartId,
                 false
         );
     }
@@ -377,7 +400,6 @@ public final class SafLepVpnService extends VpnService {
             String finalTitle,
             String finalDetails,
             ConnectionState finalState,
-            int startId,
             boolean announceStopping
     ) {
         synchronized (lifecycleLock) {
@@ -394,12 +416,24 @@ public final class SafLepVpnService extends VpnService {
             shutdownThread = new Thread(() -> {
                 statusHandler.removeCallbacks(statusReporter);
                 tearDownTunnel();
-                stopForeground(STOP_FOREGROUND_REMOVE);
+                hideForeground();
                 publishStatus(finalTitle, finalDetails, finalState);
-                if (startId > 0) stopSelfResult(startId);
-                else stopSelf();
+
+                Intent restartIntent;
+                int restartId;
+                int stopId;
                 synchronized (lifecycleLock) {
+                    restartIntent = pendingStartIntent;
+                    restartId = pendingStartId;
+                    pendingStartIntent = null;
+                    stopId = latestStartId;
                     if (Thread.currentThread() == shutdownThread) shutdownThread = null;
+                }
+                if (restartIntent != null) {
+                    statusHandler.post(() -> handleStart(restartIntent, restartId));
+                } else {
+                    // Fails harmlessly if a newer start arrived after stopId was read.
+                    stopSelfResult(stopId);
                 }
             }, "saf-lep-stop");
             shutdownThread.start();
@@ -510,9 +544,53 @@ public final class SafLepVpnService extends VpnService {
                 .build();
     }
 
+    private void showForeground(String status) {
+        synchronized (notificationLock) {
+            notificationText = status;
+            startForeground(NOTIFICATION_ID, createNotification(status));
+            inForeground = true;
+        }
+    }
+
+    private void hideForeground() {
+        synchronized (notificationLock) {
+            inForeground = false;
+            stopForeground(STOP_FOREGROUND_REMOVE);
+        }
+    }
+
     private void updateNotification(String status) {
-        NotificationManager manager = getSystemService(NotificationManager.class);
-        if (manager != null) manager.notify(NOTIFICATION_ID, createNotification(status));
+        synchronized (notificationLock) {
+            // A notify() racing stopForeground() would leave an ongoing,
+            // undismissable notification behind for a service that has stopped.
+            if (!inForeground || status.equals(notificationText)) return;
+            notificationText = status;
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) manager.notify(NOTIFICATION_ID, createNotification(status));
+        }
+    }
+
+    private void publishLinkStatus() {
+        String details = runningConfiguration + "\n" + getNativeStatus();
+        switch (getLinkPhase()) {
+            case LINK_VERIFIED:
+                publishStatus("Tunnel active", details, ConnectionState.CONNECTED);
+                updateNotification("Tunnel active");
+                break;
+            case LINK_PEER_SILENT:
+                publishStatus("Server silent", details, ConnectionState.PEER_SILENT);
+                updateNotification("Server silent, re-probing...");
+                break;
+            case LINK_UNREADABLE:
+                publishStatus("Server replies not decodable", details, ConnectionState.AWAITING_PEER);
+                updateNotification("Waiting for the server...");
+                break;
+            case LINK_NO_REPLY:
+            default:
+                publishStatus("Waiting for the server", details, ConnectionState.AWAITING_PEER);
+                updateNotification("Waiting for the server...");
+                break;
+        }
     }
 
     private static String stringExtra(Intent intent, String name, String fallback) {

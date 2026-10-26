@@ -168,10 +168,16 @@ void p2p_tunnel::handle_receive(const boost::system::error_code& error, std::siz
 {
 	if (error)
 	{
-		if (error != boost::asio::error::operation_aborted && running_)
-		{
-			std::cerr << "Receive error: " << error.message() << std::endl;
-		}
+		if (error == boost::asio::error::operation_aborted || !running_)
+			return;
+
+		// UDP receive errors describe a single datagram or ICMP report (Windows
+		// surfaces port-unreachable as connection_reset), not a dead socket.
+		// Returning without re-arming would leave the tunnel sending but deaf
+		// until it is restarted.
+		std::cerr << "Receive error: " << error.message() << std::endl;
+		stats_.add_log("[Error] Receive failed: " + error.message());
+		start_receive();
 		return;
 	}
 
@@ -782,6 +788,7 @@ void p2p_tunnel::handle_reconnect_control(peer_connection& peer,
 				if (!peer.reconnect_state.expects_challenge(message.request_nonce))
 					break;
 
+				stats_.verified_handshake_replies++;
 				reconnect::message response;
 				response.type = reconnect::message_type::confirm;
 				response.request_nonce = message.request_nonce;
@@ -808,6 +815,7 @@ void p2p_tunnel::handle_reconnect_control(peer_connection& peer,
 				response.request_nonce = message.request_nonce;
 				send_raw_control(peer, reconnect::encode(response));
 
+				stats_.verified_handshake_replies++;
 				stats_.add_log("[Tunnel] Peer session reset after verified reconnect: " +
 					endpoint_to_string(peer.endpoint));
 				connected = !was_connected;
@@ -818,6 +826,12 @@ void p2p_tunnel::handle_reconnect_control(peer_connection& peer,
 			{
 				if (!peer.reconnect_state.accept_outbound(message.request_nonce))
 					break;
+
+				// The peer reset its whole session for us before answering, so its
+				// packet ids restart from zero. Reassemblies built under its previous
+				// numbering would make those reused ids look like duplicates and drop
+				// them (or splice fragments of two different packets together).
+				reset_peer_receive_state_locked(peer);
 
 				const bool was_connected = peer.is_connected;
 				peer.is_connected = true;
@@ -856,6 +870,13 @@ bool p2p_tunnel::handle_legacy_handshake(peer_connection& peer)
 
 void p2p_tunnel::reset_peer_session_locked(peer_connection& peer)
 {
+	reset_peer_receive_state_locked(peer);
+	peer.next_send_index = 0;
+	peer.storage.clear();
+}
+
+void p2p_tunnel::reset_peer_receive_state_locked(peer_connection& peer)
+{
 	for (const auto& [packet_id, assembly] : peer.reassembly_buffer)
 	{
 		if (assembly.received_frags_count == assembly.total_frags)
@@ -865,12 +886,10 @@ void p2p_tunnel::reset_peer_session_locked(peer_connection& peer)
 		stats_.add_event(packet_event_type::lost, packet_id, 0, endpoint_to_string(peer.endpoint));
 	}
 
-	peer.next_send_index = 0;
 	peer.last_received_index = 0;
 	peer.reassembly_buffer.clear();
 	peer.reassembly_in_progress.clear();
 	peer.late_reassembly.clear();
-	peer.storage.clear();
 }
 
 void p2p_tunnel::internal_cleanup_procedure(peer_connection& peer)
